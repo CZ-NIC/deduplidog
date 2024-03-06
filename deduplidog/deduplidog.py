@@ -8,6 +8,7 @@ from datetime import datetime
 from functools import cache
 from itertools import chain
 from pathlib import Path
+import shutil
 from time import sleep
 
 import cv2
@@ -37,22 +38,25 @@ class Deduplidog:
     If media_magic=True, media files receive different rules: Neither the size nor the date are compared. See its help.
     """
 
-    work_dir: str
+    work_dir: str | Path
     "Folder of the files suspectible to be duplicates."
-    originals: str
+    original_dir: str | Path
     "Folder of the original files. Normally, these files will not be affected." \
         " (However, they might get affected by treat_bigger_as_original or set_both_to_older_date)."
 
     execute: bool = False
     "If False, nothing happens, just a safe run is performed."
-    affect_only_if_smaller = False
-    """All writing actions like rename, replace_with_original, TODOset_both_to_older_date and treat_bigger_as_original
-     are executed only to TODOthe work file and only if the work file is smaller than the original."""
-    rename: bool = True
-    """If execute=True, prepend ✓ to the file name of a duplicate file (in the work_dir, if treat_bigger_as_original is not set).
+    bashify: bool = False
+    """Print bash commands that correspond to the actions that would have been executed if execute were True.
+     You can check and run them yourself."""
+    affect_only_if_smaller: bool = False
+    """If media_magic=True, all writing actions like rename, replace_with_original, set_both_to_older_date and treat_bigger_as_original
+     are executed only if the affectable file is smaller than the other."""
+    rename: bool = False
+    """If execute=True, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).
      Mutually exclusive with replace_with_original."""
-    replace_with_original: bool = True
-    """TODO If execute=True, prepend ✓ to the file name of a duplicate file (in the work_dir, if treat_bigger_as_original is not set).
+    replace_with_original: bool = False
+    """If execute=True, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).
     Mutually exclusive with rename.
     """
     set_both_to_older_date: bool = False
@@ -133,29 +137,32 @@ class Deduplidog:
                 self.tolerate_hour = -1, 1
             case n if isinstance(n, int):
                 self.tolerate_hour = -abs(n), abs(n)
+            case _:
+                raise AssertionError("Use whole hours only")
         self._files_cache = defaultdict(set)
         "Original files, grouped by stem"
 
         self._common_prefix_length = 0
 
-        self.print_description()
+        self.check()
+        self.perform()
 
     def perform(self):
 
         # build file list of the originals
         if self.file_list:
-            if not str(self.file_list[0]).startswith(self.originals):
+            if not str(self.file_list[0]).startswith(str(self.original_dir)):
                 print("Fail: We received cached file_list but it seems containing other directory than originals.")
                 return
         else:
-            self.file_list = Deduplidog.build_originals(self.originals, self.suffixes)
+            self.file_list = Deduplidog.build_originals(self.original_dir, self.suffixes)
         print("Number of originals:", len(self.file_list))
 
         self._files_cache.clear()
         for p in self.file_list:
             p_case = Path(str(p).casefold()) if self.casefold else p
             self._files_cache[p_case.stem[:self.work_file_stem_shortened]].add(p)
-        self._common_prefix_length = len(os.path.commonprefix([self.originals, self.work_dir])) \
+        self._common_prefix_length = len(os.path.commonprefix([self.original_dir, self.work_dir])) \
             if self.shorter_log else 0
 
         # loop all files in the work dir and check them for duplicates amongst originals
@@ -197,19 +204,29 @@ class Deduplidog:
     #
     #    print('Renaming finished')
 
-    def print_description(self):
+    def check(self):
+        """ Checks setup and prints out the description. """
+        if self.affect_only_if_smaller and not self.media_magic:
+            raise AssertionError("The affect_only_if_smaller works only with media_magic")
+
         if self.media_magic:
             print("Only files with media suffixes are taken into consideration. Nor the size or date is compared.")
         else:
             print("Find files that has the same size " + ("(date is ignored)" if self.ignore_date else "and date") + ".")
-        if self.execute:
-            print("Duplicates will be ", end="")
-        else:
-            print("Nothing will happen but if execute were True, duplicates would be ", end="")
-        if self.rename:
-            print("renamed (prefixed with ✓).")
-        if self.replace_with_original:
-            print("replaced with the original.")
+
+        which = "either the file from the work dir or the original dir (whichever is bigger)" if self.treat_bigger_as_original else "duplicates"
+        small = " (only if smaller than the pair file)" if self.affect_only_if_smaller else ""
+        action = "will be" if self.execute else f"would be (if execute were True)"
+        print(f"{which.capitalize()}{small} {action} ", end="")
+
+        match self.rename, self.replace_with_original:
+            case True, False:
+                print("renamed (prefixed with ✓).")
+            case False, True:
+                print("replaced with the original.")
+            case True, True:
+                raise AssertionError("Choose either rename or replace_with_original")
+
         if self.set_both_to_older_date:
             print("Original file mtime date might be set backwards to the duplicate file.")
 
@@ -230,10 +247,10 @@ class Deduplidog:
                 except Image.DecompressionBombError as e:
                     print("Failing on exception", work_file, e)
                 except Exception as e:
-                    sleep(1 * attempt)
                     if self.fail_on_error:
                         raise
                     else:
+                        sleep(1 * attempt)
                         print("Repeating on exception", work_file, e)
                         continue
                 except KeyboardInterrupt:
@@ -264,7 +281,7 @@ class Deduplidog:
         # print stats
         bar.set_postfix({"size": naturalsize(self.size_affected),
                          "affected": self.affected_count,
-                         "file": str(work_file)[len(self.work_dir):]
+                         "file": str(work_file)[len(str(self.work_dir)):]
                          })
 
         # candidate = name matches
@@ -313,6 +330,9 @@ class Deduplidog:
                 case (False, True):
                     status[work_file].append(f"SIZE WARNING {naturalsize(work_size-orig_size)}")
                     warning = True
+            if self.affect_only_if_smaller and affected_file.stat().st_size >= other_file.stat().st_size:
+                logger.debug("Skipping %s as it is smaller than %s", affected_file, other_file)  # TODO check
+                return
 
         # execute changes or write a log
         self.size_affected += affected_file.stat().st_size
@@ -321,13 +341,13 @@ class Deduplidog:
         # setting date
         affected_date, other_date = affected_file.stat().st_mtime, other_file.stat().st_mtime
         match self.set_both_to_older_date, affected_date != other_date:
-            case (True, True):
+            case True, True:
                 # dates are not the same and we want change them
                 if other_date < affected_date:
                     self._change_file_date(affected_file, affected_date, other_date, status)
                 elif other_date > affected_date:
                     self._change_file_date(other_file, other_date, affected_date, status)
-            case (False, True) if (other_date > affected_date):
+            case False, True if (other_date > affected_date):
                 # attention, we do not want to tamper dates however the file marked as duplicate has
                 # lower timestamp (which might be genuine)
                 status[other_file].append(f"DATE WARNING + {naturaldelta(other_date-affected_date)}")
@@ -335,16 +355,35 @@ class Deduplidog:
 
         # renaming
         if self.rename:
-            if self.execute:
+            status_ = "renamable"
+            if self.execute or self.bashify:
                 # self.queue.put((affected_file, affected_file.with_name("✓" + affected_file.name)))
-                affected_file.rename(affected_file.with_name("✓" + affected_file.name))
+                target_path = affected_file.with_name("✓" + affected_file.name)
+                if self.execute:
+                    if target_path.exists():
+                        err = f"Do not rename {affected_file} because {target_path} exists."
+                        if self.fail_on_error:
+                            raise FileExistsError(err)
+                        else:
+                            logger.warning(err)
+                    else:
+                        affected_file.rename(target_path)
+                        status_ = "renaming"
+                if self.bashify:
+                    print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")  # TODO check
                 self.passed_away.add(affected_file)
-                status[affected_file].append("renaming")
-            else:
-                status[affected_file].append("renamable")
+            status[affected_file].append(status_)
+        if self.replace_with_original:
+            status_ = "replacable"
+            if self.execute:
+                status_ = "replacing"
+                shutil.copy2(other_file, affected_file)
+            if self.bashify:
+                print(f"cp --preserve {_qp(other_file)} {_qp(affected_file)}")  # TODO check
+            status[affected_file].append(status_)
 
         self.changes.append((work_file, original, status))
-        suffix = " (affected):" if affected_file == original else ":"
+        suffix = " (affected):" if affected_file is original else ":"
         getattr(logger, "warning" if warning else "info")("Original%s %s %s",
                                                           suffix, self._path(original), " ".join(str(s) for s in status[original]))
         getattr(logger, "warning" if warning else "info")(
@@ -362,6 +401,8 @@ class Deduplidog:
                             datetime.fromtimestamp(old_date), "->", datetime.fromtimestamp(new_date)))
         if self.execute:
             os.utime(path, (new_date,)*2)  # change access time, modification time
+        if self.bashify:
+            print(f"touch -t {new_date} {_qp(path)}")  # TODO check
 
     def _path(self, path):
         """ Strips out common prefix that has originals with work_dir for display reasons.
@@ -440,8 +481,16 @@ class Deduplidog:
 
     @staticmethod
     @cache
-    def build_originals(originals: str, suffixes: bool | tuple[str]):
-        return [p for p in tqdm(Path(originals).rglob("*"), desc="Caching original files") if p.is_file() and not p.is_symlink() and (not suffixes or p.suffix.lower() in suffixes)]
+    def build_originals(original_dir: str | Path, suffixes: bool | tuple[str]):
+        return [p for p in tqdm(Path(original_dir).rglob("*"), desc="Caching original files") if p.is_file() and not p.is_symlink() and (not suffixes or p.suffix.lower() in suffixes)]
+
+
+def _qp(path: Path):
+    """Quoted path. Output path to be used in bash. I wonder there is no system method which covers
+    quotes in the path etc.
+    """
+    s = str(path)
+    return f'"{s}"' if " " in s else s
 
 
 def remove_prefix_in_workdir(work_dir: str):

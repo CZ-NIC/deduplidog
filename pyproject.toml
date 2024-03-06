@@ -3,15 +3,16 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-version = "0.0.1"
+version = "0.1.0"
 description = "Deduplicate folders"
 authors = ["Edvard Rejthar <edvard.rejthar@nic.cz>"]
 license = "GPL-3.0-or-later"
 
 [tool.poetry.dependencies]
 python = ">=3.10"
-sh = "*"
 humanize = "*"
-tqdm = "*"
 imagehash = "*"
+opencv-python = "*"
 PIL = "*"
+sh = "*"
+tqdm = "*"
