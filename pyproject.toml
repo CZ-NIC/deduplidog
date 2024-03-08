@@ -3,6 +3,7 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
+name = "deduplidog"
 version = "0.5.0"
 description = "Deduplicate folders"
 authors = ["Edvard Rejthar <edvard.rejthar@nic.cz>"]
@@ -12,7 +13,9 @@ license = "GPL-3.0-or-later"
 python = ">=3.11"
 humanize = "*"
 imagehash = "*"
+IPython = "*"
+ipywidgets = "*"
 opencv-python = "*"
-PIL = "*"
+Pillow = "*"
 sh = "*"
 tqdm = "*"

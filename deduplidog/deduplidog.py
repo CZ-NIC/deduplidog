@@ -123,7 +123,7 @@ class Deduplidog:
     debug: bool = None
     fail_on_error: bool = False
     shorter_log: bool = True
-    "If True, common prefix of the file names are not output to the log to save space."
+    "TODO deprecated If True, common prefix of the file names are not output to the log to save space."
     logging_level: int = logging.WARNING
 
     ending_counter = re.compile(r"\(\d+\)$")
@@ -160,6 +160,7 @@ class Deduplidog:
         "Original files, grouped by stem"
 
         self._common_prefix_length = 0
+        " TODO deprecated"
 
         # Distinguish paths
         for a, b in zip(Path(self.work_dir).parts, Path(self.original_dir).parts):

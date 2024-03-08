@@ -1,8 +1,6 @@
 
 from dataclasses import dataclass
-from datetime import datetime
 from itertools import chain
-import logging
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory, mkdtemp
@@ -11,7 +9,7 @@ from unittest import TestCase, main
 import random
 import string
 
-from deduplidog.deduplidog import Deduplidog  # TODO: change to from deduplidog import Deduplidog
+from deduplidog import Deduplidog
 
 
 @dataclass
@@ -22,7 +20,7 @@ class FileRepresentation:
     text_seed: int = 1
 
     def __post_init__(self):
-        self._mtime = self.path.parent.stat().st_mtime + self.mtime
+        self._mtime = round(self.path.parent.parent.stat().st_mtime + self.mtime)
 
     def write(self):
         "Writes the representation to the disk."
@@ -76,7 +74,8 @@ class FolderState:
 class TestDeduplidog(TestCase):
 
     def prepare(self, testing_dir: str = None):
-        temp = Path(testing_dir) if testing_dir else Path(mkdtemp())  # TODO: TemporaryDirectory()
+        self.temp = TemporaryDirectory()
+        temp = Path(testing_dir) if testing_dir else self.temp.name
         originals = Path(temp, "originals")
         work_dir = Path(temp, "work_dir")
         if not testing_dir:
