@@ -9,7 +9,7 @@ authors = ["Edvard Rejthar <edvard.rejthar@nic.cz>"]
 license = "GPL-3.0-or-later"
 
 [tool.poetry.dependencies]
-python = ">=3.10"
+python = ">=3.11"
 humanize = "*"
 imagehash = "*"
 opencv-python = "*"

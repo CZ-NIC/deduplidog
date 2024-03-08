@@ -1,15 +1,16 @@
-from dataclasses import dataclass
 import json
 import logging
 import os
 import re
+import shutil
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from functools import cache
 from itertools import chain
 from pathlib import Path
-import shutil
 from time import sleep
+from zlib import crc32
 
 import cv2
 import imagehash
@@ -20,12 +21,15 @@ from PIL import ExifTags, Image
 from sh import find
 from tqdm.notebook import tqdm
 
-
 VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv"
 IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif"
 MEDIA_SUFFIXES = IMAGE_SUFFIXES + VIDEO_SUFFIXES
 
 logger = logging.getLogger(__name__)
+Status = dict[Path, list[str | datetime]]
+"Lists changes performed/suggested to given path"
+Change = tuple[Path, Path, Status]
+"Work file, original file, change status"
 
 
 @dataclass
@@ -66,6 +70,9 @@ class Deduplidog:
 
     casefold: bool = False
     "Case insensitive file name comparing."
+    checksum: bool = False
+    """If media_magic=False and ignore_size=False, files will be compared by CRC32 checksum.
+    (This mode is considerably slower.)"""
     tolerate_hour: int | tuple[int, int] | bool = False
     """When comparing files in work_dir and media_magic=False, tolerate hour difference.
         Sometimes when dealing with FS changes, files might got shifted few hours.
@@ -75,6 +82,8 @@ class Deduplidog:
         Ex: tolerate_hour=2 → work_file.st_mtime -7200 ... + 7200 is compared to the original_file.st_mtime """
     ignore_date: bool = False
     "If media_magic=False, files will not be compared by date."
+    ignore_size: bool = False
+    "If media_magic=False, files will not be compared by size."
     space2char: bool | str = False
     """When comparing files in work_dir, consider space as another char. Ex: "file 012.jpg" is compared as "file_012.jpg" """
     strip_end_counter: bool = False
@@ -89,6 +98,7 @@ class Deduplidog:
     Nor the size or date is compared for files with media suffixes.
     A video is considered a duplicate if it has the same name and a similar number of frames, even if it has a different extension.
     An image is considered a duplicate if it has the same name and a similar image hash, even if the files are of different sizes.
+    (This mode is considerably slower.)
     """
     accepted_frame_delta: int = 1
     "Used only when media_magic is True"
@@ -118,7 +128,7 @@ class Deduplidog:
         logger.setLevel(self.logging_level)
         [handler.setLevel(self.logging_level) for handler in logger.handlers]
 
-        self.changes: list[tuple[Path, Path, dict]] = []
+        self.changes: list[Change] = []
         "Path to the files to be changed and path to the original file and status"
         self.passed_away: set[Path] = set()
         "These paths were renamed etc."
@@ -139,16 +149,24 @@ class Deduplidog:
                 self.tolerate_hour = -abs(n), abs(n)
             case _:
                 raise AssertionError("Use whole hours only")
-        self._files_cache = defaultdict(set)
+        self._files_cache: dict[str, set[Path]] = defaultdict(set)
         "Original files, grouped by stem"
 
         self._common_prefix_length = 0
+
+        # Distinguish paths
+        for a, b in zip(Path(self.work_dir).parts, Path(self.original_dir).parts):
+            if a != b:
+                self.work_dir_name = a
+                self.original_dir_name = b
+                break
+        else:
+            self.work_dir_name = self.original_dir_name = "(same superdir)"
 
         self.check()
         self.perform()
 
     def perform(self):
-
         # build file list of the originals
         if self.file_list:
             if not str(self.file_list[0]).startswith(str(self.original_dir)):
@@ -180,11 +198,12 @@ class Deduplidog:
             raise
         finally:
             if self.bar:
-                print(f"Affected: {self.affected_count}/{self.bar.total- self.ignored_count}", end="")
+                print(f"{'Affected' if self.execute else 'Affectable'}: {self.affected_count}/{self.bar.total- self.ignored_count}", end="")
                 if self.ignored_count:
                     print(f" ({self.ignored_count} ignored)", end="")
                 print("\nAffected size:", naturalsize(self.size_affected))
-                print("Unsuccessful files having multiple candidates length:", len(self.having_multiple_candidates))
+                if self.having_multiple_candidates:
+                    print("Unsuccessful files having multiple candidates length:", len(self.having_multiple_candidates))
         #    self.queue.put(None)
         #    worker.join()
         #    print("Worker finished")
@@ -212,9 +231,17 @@ class Deduplidog:
         if self.media_magic:
             print("Only files with media suffixes are taken into consideration. Nor the size or date is compared.")
         else:
-            print("Find files that has the same size " + ("(date is ignored)" if self.ignore_date else "and date") + ".")
+            if self.ignore_size and self.checksum:
+                raise AssertionError("Checksum cannot be counted when ignore_size.")
+            used, ignored = (", ".join(filter(None, x)) for x in zip(
+                self.ignore_size and ("", "size") or ("size", ""),
+                self.ignore_date and ("", "date") or ("date", ""),
+                self.checksum and ("crc32", "") or ("", "crc32")))
+            print(f"Find files by {used}{f', ignoring: {ignored}' if ignored else ''}")
 
-        which = "either the file from the work dir or the original dir (whichever is bigger)" if self.treat_bigger_as_original else "duplicates"
+        which = f"either the file from the work dir at '{self.work_dir_name}' or the original dir at '{self.original_dir_name}' (whichever is bigger)" \
+            if self.treat_bigger_as_original \
+            else f"duplicates from the work dir at '{self.work_dir_name}'"
         small = " (only if smaller than the pair file)" if self.affect_only_if_smaller else ""
         action = "will be" if self.execute else f"would be (if execute were True)"
         print(f"{which.capitalize()}{small} {action} ", end="")
@@ -325,9 +352,9 @@ class Deduplidog:
             # the files must have the same size nevertheless.
             work_size, orig_size = work_file.stat().st_size, original.stat().st_size
             match self.treat_bigger_as_original, work_size > orig_size:
-                case (True, True):
+                case True, True:
                     affected_file, other_file = original, work_file
-                case (False, True):
+                case False, True:
                     status[work_file].append(f"SIZE WARNING {naturalsize(work_size-orig_size)}")
                     warning = True
             if self.affect_only_if_smaller and affected_file.stat().st_size >= other_file.stat().st_size:
@@ -375,11 +402,20 @@ class Deduplidog:
             status[affected_file].append(status_)
         if self.replace_with_original:
             status_ = "replacable"
-            if self.execute:
-                status_ = "replacing"
-                shutil.copy2(other_file, affected_file)
-            if self.bashify:
-                print(f"cp --preserve {_qp(other_file)} {_qp(affected_file)}")  # TODO check
+            if other_file.name == affected_file.name:
+                if self.execute:
+                    status_ = "replacing"
+                    shutil.copy2(other_file, affected_file)
+                if self.bashify:
+                    print(f"cp --preserve {_qp(other_file)} {_qp(affected_file)}")  # TODO check
+            else:
+                if self.execute:
+                    status_ = "replacing"
+                    shutil.copy2(other_file, affected_file.parent)
+                    affected_file.unlink()
+                if self.bashify:
+                    # TODO check
+                    print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
             status[affected_file].append(status_)
 
         self.changes.append((work_file, original, status))
@@ -408,6 +444,8 @@ class Deduplidog:
         """ Strips out common prefix that has originals with work_dir for display reasons.
             /media/user/disk1/Photos -> 1/Photos
             /media/user/disk2/Photos -> 2/Photos
+
+            TODO May use self.work_file_name
         """
         return str(path)[self._common_prefix_length:]
 
@@ -418,7 +456,7 @@ class Deduplidog:
             if (self.ignore_date
                         or wst.st_mtime == ost.st_mtime
                         or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
-                    ) and wst.st_size == ost.st_size:
+                    ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 
     def _find_similar_media(self,  work_file: Path, comparing_image: bool, candidates: list[Path]):
@@ -436,8 +474,7 @@ class Deduplidog:
                     work_pil = Image.open(work_file)
                 similar = self.image_similar(original, work_file, work_pil, ref_time)
             else:  # comparing videos
-                frame_delta = abs(get_frame_count(
-                    work_file) - get_frame_count(original))
+                frame_delta = abs(get_frame_count(work_file) - get_frame_count(original))
                 similar = frame_delta <= self.accepted_frame_delta
                 if not similar and self.debug:
                     print("Frame delta:", frame_delta, work_file, original)
@@ -472,9 +509,10 @@ class Deduplidog:
                 hash0 = imagehash.average_hash(original_pil)
                 hash1 = imagehash.average_hash(work_pil)
                 # maximum bits that could be different between the hashes
-                similar = abs(hash0 - hash1) <= self.accepted_img_hash_diff
+                hash_dist = abs(hash0 - hash1)
+                similar = hash_dist <= self.accepted_img_hash_diff
                 if not similar and self.debug:
-                    print("Hash distance:", abs(hash0 - hash1))
+                    print("Hash distance:", hash_dist)
             return similar
         except OSError as e:
             print(e, original, work_file)
@@ -483,6 +521,31 @@ class Deduplidog:
     @cache
     def build_originals(original_dir: str | Path, suffixes: bool | tuple[str]):
         return [p for p in tqdm(Path(original_dir).rglob("*"), desc="Caching original files") if p.is_file() and not p.is_symlink() and (not suffixes or p.suffix.lower() in suffixes)]
+
+    def print_changes(mdf):
+        "Prints performed/suggested changes to be inspected in a human readable form."
+        work, orig = "🔨", "📄"
+        for work_file, original, status in mdf.changes:
+            print("*", work_file)
+            print(" ", original)
+            for path, changes in status.items():
+                if not len(changes):
+                    continue
+                print(f"  {work}{mdf.work_dir_name}:" if path ==
+                      work_file else f"  {orig}{mdf.original_dir_name}:", *(str(s) for s in changes))
+
+
+@cache
+def crc(path: Path):
+    """ Surprisingly, sha256 and sha1 was faster than md5 when using hashlib.file_digest. However crc32 is still the fastest."""
+    crc = 0
+    with path.open('rb') as f:
+        while True:
+            chunk = f.read(4096)
+            if not chunk:
+                break
+            crc = crc32(chunk, crc)
+    return crc
 
 
 def _qp(path: Path):
@@ -501,13 +564,11 @@ def remove_prefix_in_workdir(work_dir: str):
         p.rename(p.with_stem(p.stem.removeprefix("✓")))
 
 
+@cache
 def get_frame_count(filename):
-    import cv2
     video = cv2.VideoCapture(str(filename))
-
     # duration = video.get(cv2.CAP_PROP_POS_MSEC)
     frame_count = video.get(cv2.CAP_PROP_FRAME_COUNT)
-
     return frame_count
 
 
