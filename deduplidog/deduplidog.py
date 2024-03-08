@@ -26,10 +26,8 @@ IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif"
 MEDIA_SUFFIXES = IMAGE_SUFFIXES + VIDEO_SUFFIXES
 
 logger = logging.getLogger(__name__)
-Status = dict[Path, list[str | datetime]]
-"Lists changes performed/suggested to given path"
-Change = tuple[Path, Path, Status]
-"Work file, original file, change status"
+Change = dict[Path, list[str | datetime]]
+"Lists changes performed/suggested to given path. First entry is the work file, the second is the original file."
 
 
 @dataclass
@@ -105,7 +103,7 @@ class Deduplidog:
     accepted_img_hash_diff: int = 1
     "Used only when media_magic is True"
     img_compare_date = False
-    "If True and media_magic=True, aby se obrázek považoval za duplikát, musí mít podobný čas v EXIFu či souboru. Used only when media_magic is True."
+    "If True and media_magic=True, the file date or the EXIF date must match."
 
     file_list: list[Path] = None
     "Use original file list. If none, a new is generated or a cached version is used."
@@ -135,6 +133,8 @@ class Deduplidog:
         self.size_affected = 0
         "stats counter"
         self.affected_count = 0
+        "stats counter"
+        self.warning_count = 0
         "stats counter"
         self.ignored_count = 0
         "Files skipped because previously renamed with deduplidog"
@@ -198,10 +198,12 @@ class Deduplidog:
             raise
         finally:
             if self.bar:
-                print(f"{'Affected' if self.execute else 'Affectable'}: {self.affected_count}/{self.bar.total- self.ignored_count}", end="")
+                print(f"{'Affected' if self.execute else 'Affectable'}: {self.affected_count}/{len(self.file_list)- self.ignored_count}", end="")
                 if self.ignored_count:
                     print(f" ({self.ignored_count} ignored)", end="")
                 print("\nAffected size:", naturalsize(self.size_affected))
+                if self.warning_count:
+                    print(f"Warnings: {self.warning_count}")
                 if self.having_multiple_candidates:
                     print("Unsuccessful files having multiple candidates length:", len(self.having_multiple_candidates))
         #    self.queue.put(None)
@@ -282,9 +284,8 @@ class Deduplidog:
                         continue
                 except KeyboardInterrupt:
                     print(f"Interrupted. You may proceed where you left with the skip={skip+bar.n} parameter.")
-                    return bar
+                    return
                 break
-        return bar
 
     def _process_file(self, work_file: Path, bar: tqdm):
         # work file name transformation
@@ -341,7 +342,7 @@ class Deduplidog:
 
     def _affect(self, work_file: Path, original: Path):
         # which file will be affected? The work file or the mistakenly original file?
-        status = {work_file: [], original: []}
+        change = {work_file: [], original: []}
         affected_file, other_file = work_file, original
         warning = False
         if affected_file == other_file:
@@ -355,7 +356,7 @@ class Deduplidog:
                 case True, True:
                     affected_file, other_file = original, work_file
                 case False, True:
-                    status[work_file].append(f"SIZE WARNING {naturalsize(work_size-orig_size)}")
+                    change[work_file].append(f"SIZE WARNING {naturalsize(work_size-orig_size)}")
                     warning = True
             if self.affect_only_if_smaller and affected_file.stat().st_size >= other_file.stat().st_size:
                 logger.debug("Skipping %s as it is smaller than %s", affected_file, other_file)  # TODO check
@@ -371,13 +372,13 @@ class Deduplidog:
             case True, True:
                 # dates are not the same and we want change them
                 if other_date < affected_date:
-                    self._change_file_date(affected_file, affected_date, other_date, status)
+                    self._change_file_date(affected_file, affected_date, other_date, change)
                 elif other_date > affected_date:
-                    self._change_file_date(other_file, other_date, affected_date, status)
+                    self._change_file_date(other_file, other_date, affected_date, change)
             case False, True if (other_date > affected_date):
                 # attention, we do not want to tamper dates however the file marked as duplicate has
                 # lower timestamp (which might be genuine)
-                status[other_file].append(f"DATE WARNING + {naturaldelta(other_date-affected_date)}")
+                change[other_file].append(f"DATE WARNING + {naturaldelta(other_date-affected_date)}")
                 warning = True
 
         # renaming
@@ -399,7 +400,7 @@ class Deduplidog:
                 if self.bashify:
                     print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")  # TODO check
                 self.passed_away.add(affected_file)
-            status[affected_file].append(status_)
+            change[affected_file].append(status_)
         if self.replace_with_original:
             status_ = "replacable"
             if other_file.name == affected_file.name:
@@ -416,16 +417,20 @@ class Deduplidog:
                 if self.bashify:
                     # TODO check
                     print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
-            status[affected_file].append(status_)
+            change[affected_file].append(status_)
 
-        self.changes.append((work_file, original, status))
-        suffix = " (affected):" if affected_file is original else ":"
-        getattr(logger, "warning" if warning else "info")("Original%s %s %s",
-                                                          suffix, self._path(original), " ".join(str(s) for s in status[original]))
-        getattr(logger, "warning" if warning else "info")(
-            "Work file: %s %s", self._path(work_file), " ".join(str(s) for s in status[work_file]))
+        self.changes.append(change)
+        if warning:
+            self.warning_count += 1
+        if (warning and self.logging_level <= logging.WARNING) or (self.logging_level <= logging.INFO):
+            self._print_change(change)
+        # suffix = " (affected):" if affected_file is original else ":"
+        # getattr(logger, "warning" if warning else "info")("Original%s %s %s",
+        #                                                   suffix, self._path(original), " ".join(str(s) for s in change[original]))
+        # getattr(logger, "warning" if warning else "info")(
+        #     "Work file: %s %s", self._path(work_file), " ".join(str(s) for s in change[work_file]))
 
-    def _change_file_date(self, path, old_date, new_date, status):
+    def _change_file_date(self, path, old_date, new_date, change: Change):
         # Consider following usecase:
         # Duplicated file 1, date 14:06
         # Duplicated file 2, date 15:06
@@ -433,7 +438,7 @@ class Deduplidog:
         # The status message will mistakingly tell that we change Original date to 14:06 (good), then to 15:06 (bad).
         # However, these are just the status messages. But as we resolve the dates at the launch time,
         # original date will end up as 14:06 because 15:06 will be later.
-        status[path].extend(("redating" if self.execute else 'redatable',
+        change[path].extend(("redating" if self.execute else 'redatable',
                             datetime.fromtimestamp(old_date), "->", datetime.fromtimestamp(new_date)))
         if self.execute:
             os.utime(path, (new_date,)*2)  # change access time, modification time
@@ -522,17 +527,18 @@ class Deduplidog:
     def build_originals(original_dir: str | Path, suffixes: bool | tuple[str]):
         return [p for p in tqdm(Path(original_dir).rglob("*"), desc="Caching original files") if p.is_file() and not p.is_symlink() and (not suffixes or p.suffix.lower() in suffixes)]
 
-    def print_changes(mdf):
+    def print_changes(self):
         "Prints performed/suggested changes to be inspected in a human readable form."
-        work, orig = "🔨", "📄"
-        for work_file, original, status in mdf.changes:
-            print("*", work_file)
-            print(" ", original)
-            for path, changes in status.items():
-                if not len(changes):
-                    continue
-                print(f"  {work}{mdf.work_dir_name}:" if path ==
-                      work_file else f"  {orig}{mdf.original_dir_name}:", *(str(s) for s in changes))
+        [self._print_change(change) for change in self.changes]
+
+    def _print_change(self, change: Change):
+        wicon, oicon = "🔨", "📄"
+        wf, of = change
+        print("*", wf)
+        print(" ", of)
+        [print(text, *(str(s) for s in changes))
+            for text, changes in zip((f"  {wicon}{self.work_dir_name}:",
+                                      f"  {oicon}{self.original_dir_name}:"), change.values()) if len(changes)]
 
 
 @cache
@@ -555,6 +561,8 @@ def _qp(path: Path):
     s = str(path)
     return f'"{s}"' if " " in s else s
 
+
+# TODO: below are some functions that should be converted into documented utils or removed
 
 def remove_prefix_in_workdir(work_dir: str):
     """ Removes the prefix ✓ recursively from all the files.
