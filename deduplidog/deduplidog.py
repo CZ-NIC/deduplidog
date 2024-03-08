@@ -46,6 +46,7 @@ class Deduplidog:
     "Folder of the original files. Normally, these files will not be affected." \
         " (However, they might get affected by treat_bigger_as_original or set_both_to_older_date)."
 
+    # Action section
     execute: bool = False
     "If False, nothing happens, just a safe run is performed."
     bashify: bool = False
@@ -56,16 +57,19 @@ class Deduplidog:
      are executed only if the affectable file is smaller than the other."""
     rename: bool = False
     """If execute=True, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).
-     Mutually exclusive with replace_with_original."""
+     Mutually exclusive with replace_with_original and delete."""
+    delete: bool = False
+    """If execute=True, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).
+     Mutually exclusive with replace_with_original and rename."""
     replace_with_original: bool = False
     """If execute=True, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).
-    Mutually exclusive with rename.
-    """
+    Mutually exclusive with rename and delete."""
     set_both_to_older_date: bool = False
     "If execute=True, media_magic=True or (media_magic=False and ignore_date=True), both files are set to the older date. Ex: work file get's the original file's date or vice versa."
     treat_bigger_as_original: bool = False
     "If execute=True and rename=True and media_magic=True, the original file might be affected (by renaming) if smaller than the work file."
 
+    # Match section
     casefold: bool = False
     "Case insensitive file name comparing."
     checksum: bool = False
@@ -91,6 +95,7 @@ class Deduplidog:
     work_file_stem_shortened: int = None
     "Photos downloaded from Google have its stem shortened to 47 chars. For the comparing purpose, treat original folder file names shortened."
 
+    # Media section
     media_magic: bool = False
     """
     Nor the size or date is compared for files with media suffixes.
@@ -102,8 +107,10 @@ class Deduplidog:
     "Used only when media_magic is True"
     accepted_img_hash_diff: int = 1
     "Used only when media_magic is True"
-    img_compare_date = False
+    img_compare_date: bool = False
     "If True and media_magic=True, the file date or the EXIF date must match."
+
+    # Following parameters are undocumented:
 
     file_list: list[Path] = None
     "Use original file list. If none, a new is generated or a cached version is used."
@@ -198,7 +205,8 @@ class Deduplidog:
             raise
         finally:
             if self.bar:
-                print(f"{'Affected' if self.execute else 'Affectable'}: {self.affected_count}/{len(self.file_list)- self.ignored_count}", end="")
+                print(
+                    f"{'Affected' if self.execute else 'Affectable'}: {self.affected_count}/{len(self.file_list)- self.ignored_count}", end="")
                 if self.ignored_count:
                     print(f" ({self.ignored_count} ignored)", end="")
                 print("\nAffected size:", naturalsize(self.size_affected))
@@ -248,12 +256,16 @@ class Deduplidog:
         action = "will be" if self.execute else f"would be (if execute were True)"
         print(f"{which.capitalize()}{small} {action} ", end="")
 
-        match self.rename, self.replace_with_original:
-            case True, False:
+        match self.rename, self.replace_with_original, self.delete:
+            case False, False, False:
+                pass
+            case True, False, False:
                 print("renamed (prefixed with ✓).")
-            case False, True:
+            case False, True, False:
                 print("replaced with the original.")
-            case True, True:
+            case False, False, True:
+                print("deleted.")
+            case _:
                 raise AssertionError("Choose either rename or replace_with_original")
 
         if self.set_both_to_older_date:
@@ -381,54 +393,70 @@ class Deduplidog:
                 change[other_file].append(f"DATE WARNING + {naturaldelta(other_date-affected_date)}")
                 warning = True
 
-        # renaming
+        # other actions
         if self.rename:
-            status_ = "renamable"
-            if self.execute or self.bashify:
-                # self.queue.put((affected_file, affected_file.with_name("✓" + affected_file.name)))
-                target_path = affected_file.with_name("✓" + affected_file.name)
-                if self.execute:
-                    if target_path.exists():
-                        err = f"Do not rename {affected_file} because {target_path} exists."
-                        if self.fail_on_error:
-                            raise FileExistsError(err)
-                        else:
-                            logger.warning(err)
-                    else:
-                        affected_file.rename(target_path)
-                        status_ = "renaming"
-                if self.bashify:
-                    print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")  # TODO check
-                self.passed_away.add(affected_file)
-            change[affected_file].append(status_)
+            self._rename(change, affected_file)
+
+        if self.delete:
+            self._delete(change, affected_file)
+
         if self.replace_with_original:
-            status_ = "replacable"
-            if other_file.name == affected_file.name:
-                if self.execute:
-                    status_ = "replacing"
-                    shutil.copy2(other_file, affected_file)
-                if self.bashify:
-                    print(f"cp --preserve {_qp(other_file)} {_qp(affected_file)}")  # TODO check
-            else:
-                if self.execute:
-                    status_ = "replacing"
-                    shutil.copy2(other_file, affected_file.parent)
-                    affected_file.unlink()
-                if self.bashify:
-                    # TODO check
-                    print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
-            change[affected_file].append(status_)
+            self._replace_with_original(change, affected_file, other_file)
 
         self.changes.append(change)
         if warning:
             self.warning_count += 1
         if (warning and self.logging_level <= logging.WARNING) or (self.logging_level <= logging.INFO):
             self._print_change(change)
-        # suffix = " (affected):" if affected_file is original else ":"
-        # getattr(logger, "warning" if warning else "info")("Original%s %s %s",
-        #                                                   suffix, self._path(original), " ".join(str(s) for s in change[original]))
-        # getattr(logger, "warning" if warning else "info")(
-        #     "Work file: %s %s", self._path(work_file), " ".join(str(s) for s in change[work_file]))
+
+    def _rename(self, change: Change, affected_file: Path):
+        msg = "renamable"
+        if self.execute or self.bashify:
+            # self.queue.put((affected_file, affected_file.with_name("✓" + affected_file.name)))
+            target_path = affected_file.with_name("✓" + affected_file.name)
+            if self.execute:
+                if target_path.exists():
+                    err = f"Do not rename {affected_file} because {target_path} exists."
+                    if self.fail_on_error:
+                        raise FileExistsError(err)
+                    else:
+                        logger.warning(err)
+                else:
+                    affected_file.rename(target_path)
+                    msg = "renaming"
+            if self.bashify:
+                print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")  # TODO check
+            self.passed_away.add(affected_file)
+        change[affected_file].append(msg)
+
+    def _delete(self, change: Change, affected_file: Path):
+        msg = "deletable"
+        if self.execute or self.bashify:
+            if self.execute:
+                affected_file.unlink()
+                msg = "deleting"
+            if self.bashify:
+                print(f"rm {_qp(affected_file)}")  # TODO check
+            self.passed_away.add(affected_file)
+        change[affected_file].append(msg)
+
+    def _replace_with_original(self, change: Change, affected_file: Path, other_file: Path):
+        msg = "replacable"
+        if other_file.name == affected_file.name:
+            if self.execute:
+                msg = "replacing"
+                shutil.copy2(other_file, affected_file)
+            if self.bashify:
+                print(f"cp --preserve {_qp(other_file)} {_qp(affected_file)}")  # TODO check
+        else:
+            if self.execute:
+                msg = "replacing"
+                shutil.copy2(other_file, affected_file.parent)
+                affected_file.unlink()
+            if self.bashify:
+                # TODO check
+                print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
+        change[affected_file].append(msg)
 
     def _change_file_date(self, path, old_date, new_date, change: Change):
         # Consider following usecase:
@@ -459,8 +487,8 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.ignore_date
-                        or wst.st_mtime == ost.st_mtime
-                        or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
+                    or wst.st_mtime == ost.st_mtime
+                    or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
                     ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 

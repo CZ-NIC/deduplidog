@@ -101,5 +101,39 @@ mv -n /home/user/duplicates/third.txt /home/user/duplicates/✓third.txt
 
 # Documentation – `Deduplidog` class
 
+Import the `Deduplidog` class and change its parameters.
+
+```python3
+from deduplidog import Deduplidog
+```
+
 Find the duplicates. Normally, the file must have the same size, date and name. (Name might be just similar if parameters like strip_end_counter are set.) If media_magic=True, media files receive different rules: Neither the size nor the date are compared. See its help.
 
+| parameter | type | default | description |
+|-----------|------|---------|-------------|
+| work_dir | str \| Path | - | Folder of the files suspectible to be duplicates. |
+| original_dir | str \| Path | - | Folder of the original files. Normally, these files will not be affected.<br> (However, they might get affected by treat_bigger_as_original or set_both_to_older_date). |
+| **Actions** |
+| execute | bool | False | If False, nothing happens, just a safe run is performed. |
+| bashify | bool | False | Print bash commands that correspond to the actions that would have been executed if execute were True.<br>    You can check and run them yourself. |
+| affect_only_if_smaller | bool | False | If media_magic=True, all writing actions like rename, replace_with_original, set_both_to_older_date and treat_bigger_as_original<br>    are executed only if the affectable file is smaller than the other. |
+| rename | bool | False | If execute=True, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).<br>    Mutually exclusive with replace_with_original and delete. |
+| delete | bool | False | If execute=True, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).<br>Mutually exclusive with replace_with_original and rename. |
+| replace_with_original | bool | False | If execute=True, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).<br>Mutually exclusive with rename and delete. |
+| set_both_to_older_date | bool | False | If execute=True, media_magic=True or (media_magic=False and ignore_date=True), both files are set to the older date. Ex: work file get's the original file's date or vice versa. |
+| treat_bigger_as_original | bool | False | If execute=True and rename=True and media_magic=True, the original file might be affected (by renaming) if smaller than the work file. |
+| **Matching** |
+| casefold | bool | False | Case insensitive file name comparing. |
+| checksum | bool | False | If media_magic=False and ignore_size=False, files will be compared by CRC32 checksum. <br> (This mode is considerably slower.) |
+| tolerate_hour | int \| tuple[int, int] \| bool | False | When comparing files in work_dir and media_magic=False, tolerate hour difference.<br>    Sometimes when dealing with FS changes, files might got shifted few hours.<br>    * bool → -1 .. +1<br>    * int → -int .. +int<br>    * tuple → int1 .. int2<br>    Ex: tolerate_hour=2 → work_file.st_mtime -7200 ... + 7200 is compared to the original_file.st_mtime  |
+| ignore_date | bool | False | If media_magic=False, files will not be compared by date. |
+| ignore_size | bool | False | If media_magic=False, files will not be compared by size. |
+| space2char | bool \| str | False | When comparing files in work_dir, consider space as another char. Ex: "file 012.jpg" is compared as "file_012.jpg"  |
+| strip_end_counter | bool | False | When comparing files in work_dir, strip the counter. Ex: "00034(3).MTS" is compared as "00034.MTS"  |
+| strip_suffix | str | False | When comparing files in work_dir, strip the file name end matched by a regular. Ex: "001-edited.jpg" is compared as "001.jpg"  |
+| work_file_stem_shortened | int | None | Photos downloaded from Google have its stem shortened to 47 chars. For the comparing purpose, treat original folder file names shortened. |
+| **Media** |
+| media_magic | bool | False | Nor the size or date is compared for files with media suffixes.<br>A video is considered a duplicate if it has the same name and a similar number of frames, even if it has a different extension.<br>An image is considered a duplicate if it has the same name and a similar image hash, even if the files are of different sizes.<br>(This mode is considerably slower.) |
+| accepted_frame_delta | int | 1 | Used only when media_magic is True |
+| accepted_img_hash_diff | int | 1 | Used only when media_magic is True |
+| img_compare_date | bool | False | If True and media_magic=True, the file date or the EXIF date must match. |
