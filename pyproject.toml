@@ -4,10 +4,12 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "deduplidog"
-version = "0.6.0"
-description = "Deduplicate folders"
+version = "0.6.1"
+description = "Yet another file deduplicator"
 authors = ["Edvard Rejthar <edvard.rejthar@nic.cz>"]
 license = "GPL-3.0-or-later"
+homepage = "https://github.com/CZ-NIC/deduplidog"
+readme = "README.md"
 
 [tool.poetry.dependencies]
 click = "~=8.1.7"
