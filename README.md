@@ -34,9 +34,14 @@ These imply the folders have the same structure. Deduplidog is tolerant towards 
 
 The program does not write anything to the disk, unless `execute=True` is set. Feel free to launch it just to inspect the recommended actions. Or set `bashify=True` to output bash commands you may launch after thorough examining.
 
+# Launch
+
+It works as a standalone program with both CLI and TUI interfaces. Just launch the `deduplidog` command.
+Moreover, it works best when imported from a [Jupyter Notebook](https://jupyter.org/).
+
 # Examples
 
-It works great when launched from a [Jupyter Notebook](https://jupyter.org/).
+Let's take a closer look to a use-case.
 
 ```python3
 import logging

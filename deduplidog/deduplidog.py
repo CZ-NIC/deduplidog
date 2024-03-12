@@ -10,16 +10,21 @@ from functools import cache
 from itertools import chain
 from pathlib import Path
 from time import sleep
+from typing import Annotated, get_args, get_type_hints
 from zlib import crc32
 
+import click
 import cv2
 import imagehash
+from dataclass_click import option
 from humanize import naturaldelta, naturalsize
 from IPython.display import Image, clear_output, display
 from ipywidgets import HBox, widgets
 from PIL import ExifTags, Image
 from sh import find
-from tqdm.notebook import tqdm
+from tqdm.autonotebook import tqdm
+
+from .interface_utils import Field
 
 VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv"
 IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif"
@@ -28,6 +33,29 @@ MEDIA_SUFFIXES = IMAGE_SUFFIXES + VIDEO_SUFFIXES
 logger = logging.getLogger(__name__)
 Change = dict[Path, list[str | datetime]]
 "Lists changes performed/suggested to given path. First entry is the work file, the second is the original file."
+
+
+# Unfortunately, instead of writing brief docstrings, Python has no regular way to annotate dataclass attributes.
+# As mere strings are not kept in the runtime, we have to use cubersome Annotated syntax.
+# Pros: We do not have to duplicate the copy the text while using TUI and CLI.
+# Cons:
+#   Help text is not displayed during static analysis (as an IDE hint).
+#   We have to write the default value twice. (For the CLI and for the direct import to i.e. a jupyter notebook.)
+def flag(help):
+    "CLI support"
+    return option(help=help, is_flag=True, default=False)
+
+
+def conversion(_ctx, option, value):
+    return Field(option.name,
+                 value,
+                 get_args(get_type_hints(Deduplidog, include_extras=True)[option.name])[0]) \
+        .convert()
+
+
+def opt(help, default):
+    "CLI support"
+    return option(help=help, default=default, type=click.UNPROCESSED, callback=conversion)
 
 
 @dataclass
@@ -40,75 +68,74 @@ class Deduplidog:
     If media_magic=True, media files receive different rules: Neither the size nor the date are compared. See its help.
     """
 
-    work_dir: str | Path
-    "Folder of the files suspectible to be duplicates."
-    original_dir: str | Path
-    "Folder of the original files. Normally, these files will not be affected." \
-        " (However, they might get affected by treat_bigger_as_original or set_both_to_older_date)."
+    work_dir: Annotated[str | Path, option(
+        help="""Folder of the files suspectible to be duplicates.""", required=True, type=click.UNPROCESSED)]
+    original_dir: Annotated[str | Path, option(
+        help="""Folder of the original files. Normally, these files will not be affected.
+        (However, they might get affected by treat_bigger_as_original or set_both_to_older_date).""", default="", type=click.UNPROCESSED)] = ""
 
     # Action section
-    execute: bool = False
-    "If False, nothing happens, just a safe run is performed."
-    bashify: bool = False
-    """Print bash commands that correspond to the actions that would have been executed if execute were True.
-     You can check and run them yourself."""
-    affect_only_if_smaller: bool = False
-    """If media_magic=True, all writing actions like rename, replace_with_original, set_both_to_older_date and treat_bigger_as_original
-     are executed only if the affectable file is smaller than the other."""
-    rename: bool = False
-    """If execute=True, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).
-     Mutually exclusive with replace_with_original and delete."""
-    delete: bool = False
-    """If execute=True, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).
-     Mutually exclusive with replace_with_original and rename."""
-    replace_with_original: bool = False
-    """If execute=True, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).
-    Mutually exclusive with rename and delete."""
-    set_both_to_older_date: bool = False
-    "If execute=True, media_magic=True or (media_magic=False and ignore_date=True), both files are set to the older date. Ex: work file get's the original file's date or vice versa."
-    treat_bigger_as_original: bool = False
-    "If execute=True and rename=True and media_magic=True, the original file might be affected (by renaming) if smaller than the work file."
+    execute: Annotated[bool, flag(
+        "If False, nothing happens, just a safe run is performed.")] = False
+    bashify: Annotated[bool, flag(
+        """Print bash commands that correspond to the actions that would have been executed if execute were True.
+     You can check and run them yourself.""")] = False
+    affect_only_if_smaller: Annotated[bool, flag(
+        """If media_magic=True, all writing actions like rename, replace_with_original, set_both_to_older_date and treat_bigger_as_original
+     are executed only if the affectable file is smaller than the other.""")] = False
+    rename: Annotated[bool, flag(
+        """If execute=True, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).
+     Mutually exclusive with replace_with_original and delete.""")] = False
+    delete: Annotated[bool, flag(
+        """If execute=True, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).
+     Mutually exclusive with replace_with_original and rename.""")] = False
+    replace_with_original: Annotated[bool, flag(
+        """If execute=True, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).
+    Mutually exclusive with rename and delete.""")] = False
+    set_both_to_older_date: Annotated[bool, flag(
+        "If execute=True, media_magic=True or (media_magic=False and ignore_date=True), both files are set to the older date. Ex: work file get's the original file's date or vice versa.")] = False
+    treat_bigger_as_original: Annotated[bool, flag(
+        "If execute=True and rename=True and media_magic=True, the original file might be affected (by renaming) if smaller than the work file.")] = False
 
     # Match section
-    casefold: bool = False
-    "Case insensitive file name comparing."
-    checksum: bool = False
-    """If media_magic=False and ignore_size=False, files will be compared by CRC32 checksum.
-    (This mode is considerably slower.)"""
-    tolerate_hour: int | tuple[int, int] | bool = False
-    """When comparing files in work_dir and media_magic=False, tolerate hour difference.
+    casefold: Annotated[bool, flag(
+        "Case insensitive file name comparing.")] = False
+    checksum: Annotated[bool, flag(
+        """If media_magic=False and ignore_size=False, files will be compared by CRC32 checksum.
+    (This mode is considerably slower.)""")] = False
+    tolerate_hour: Annotated[int | tuple[int, int] | bool, opt(
+        """When comparing files in work_dir and media_magic=False, tolerate hour difference.
         Sometimes when dealing with FS changes, files might got shifted few hours.
         * bool → -1 .. +1
         * int → -int .. +int
         * tuple → int1 .. int2
-        Ex: tolerate_hour=2 → work_file.st_mtime -7200 ... + 7200 is compared to the original_file.st_mtime """
-    ignore_date: bool = False
-    "If media_magic=False, files will not be compared by date."
-    ignore_size: bool = False
-    "If media_magic=False, files will not be compared by size."
-    space2char: bool | str = False
-    """When comparing files in work_dir, consider space as another char. Ex: "file 012.jpg" is compared as "file_012.jpg" """
-    strip_end_counter: bool = False
-    """When comparing files in work_dir, strip the counter. Ex: "00034(3).MTS" is compared as "00034.MTS" """
-    strip_suffix: str = False
-    """When comparing files in work_dir, strip the file name end matched by a regular. Ex: "001-edited.jpg" is compared as "001.jpg" """
-    work_file_stem_shortened: int = None
-    "Photos downloaded from Google have its stem shortened to 47 chars. For the comparing purpose, treat original folder file names shortened."
+        Ex: tolerate_hour=2 → work_file.st_mtime -7200 ... + 7200 is compared to the original_file.st_mtime """, False)] = False
+    ignore_date: Annotated[bool, flag(
+        "If media_magic=False, files will not be compared by date.")] = False
+    ignore_size: Annotated[bool, flag(
+        "If media_magic=False, files will not be compared by size.")] = False
+    space2char: Annotated[bool, flag(
+        """When comparing files in work_dir, consider space as another char. Ex: "file 012.jpg" is compared as "file_012.jpg" """)] = False
+    strip_end_counter: Annotated[bool, flag(
+        """When comparing files in work_dir, strip the counter. Ex: "00034(3).MTS" is compared as "00034.MTS" """)] = False
+    strip_suffix: Annotated[str, opt(
+        """When comparing files in work_dir, strip the file name end matched by a regular. Ex: "001-edited.jpg" is compared as "001.jpg" """, False)] = False
+    work_file_stem_shortened: Annotated[int, opt(
+        "Photos downloaded from Google have its stem shortened to 47 chars. For the comparing purpose, treat original folder file names shortened.", None)] = None
 
     # Media section
-    media_magic: bool = False
-    """
-    Nor the size or date is compared for files with media suffixes.
+    media_magic: Annotated[bool, flag(
+        """Nor the size or date is compared for files with media suffixes.
     A video is considered a duplicate if it has the same name and a similar number of frames, even if it has a different extension.
     An image is considered a duplicate if it has the same name and a similar image hash, even if the files are of different sizes.
     (This mode is considerably slower.)
-    """
-    accepted_frame_delta: int = 1
-    "Used only when media_magic is True"
-    accepted_img_hash_diff: int = 1
-    "Used only when media_magic is True"
-    img_compare_date: bool = False
-    "If True and media_magic=True, the file date or the EXIF date must match."
+    """)] = False
+    accepted_frame_delta: Annotated[int, opt(
+        "Used only when media_magic is True", 1)] = 1
+    accepted_img_hash_diff: Annotated[int, opt(
+        "Used only when media_magic is True", 1)] = 1
+    img_compare_date: Annotated[bool, flag(
+        "If True and media_magic=True, the file date or the EXIF date must match.")] = False
 
     # Following parameters are undocumented:
 
@@ -127,6 +154,11 @@ class Deduplidog:
     logging_level: int = logging.WARNING
 
     ending_counter = re.compile(r"\(\d+\)$")
+
+    def __repr__(self):
+        text = ', '.join(f'{attr}={len(v)  if isinstance(v, (set, list, dict)) else v}' for attr,
+                         v in vars(self).items())
+        return f'Deduplidog({text})'
 
     def __post_init__(self):
         logging.basicConfig(level=self.logging_level, format="%(message)s", force=True)
@@ -154,6 +186,8 @@ class Deduplidog:
                 self.tolerate_hour = -1, 1
             case n if isinstance(n, int):
                 self.tolerate_hour = -abs(n), abs(n)
+            case n if isinstance(n, tuple) and all(isinstance(x, int) for x in n):
+                pass
             case _:
                 raise AssertionError("Use whole hours only")
         self._files_cache: dict[str, set[Path]] = defaultdict(set)
@@ -163,13 +197,19 @@ class Deduplidog:
         " TODO deprecated"
 
         # Distinguish paths
-        for a, b in zip(Path(self.work_dir).parts, Path(self.original_dir).parts):
-            if a != b:
-                self.work_dir_name = a
-                self.original_dir_name = b
-                break
+        if not self.original_dir:
+            self.original_dir = self.work_dir
+        if not self.work_dir:
+            raise AssertionError("Missing work_dir")
         else:
-            self.work_dir_name = self.original_dir_name = "(same superdir)"
+            for a, b in zip(Path(self.work_dir).parts, Path(self.original_dir).parts):
+                if a != b:
+                    self.work_dir_name = a
+                    self.original_dir_name = b
+                    break
+            else:
+                self.work_dir_name = a
+                self.original_dir_name = "(same superdir)"
 
         self.check()
         self.perform()
@@ -281,7 +321,7 @@ class Deduplidog:
             else:
                 [next(work_files) for _ in range(skip)]
             print("Skipped", skip)
-        self.bar = bar = tqdm(work_files)
+        self.bar = bar = tqdm(work_files, leave=False)
         for work_file in bar:
             for attempt in range(5):
                 try:
@@ -363,7 +403,7 @@ class Deduplidog:
             return
         if self.media_magic:  # why checking media_magic?
             # This is just a double check because if not media_magic,
-            # the files must have the same size nevertheless.
+            # the files must have the same size nevertheless.)
             work_size, orig_size = work_file.stat().st_size, original.stat().st_size
             match self.treat_bigger_as_original, work_size > orig_size:
                 case True, True:
@@ -372,7 +412,7 @@ class Deduplidog:
                     change[work_file].append(f"SIZE WARNING {naturalsize(work_size-orig_size)}")
                     warning = True
             if self.affect_only_if_smaller and affected_file.stat().st_size >= other_file.stat().st_size:
-                logger.debug("Skipping %s as it is smaller than %s", affected_file, other_file)  # TODO check
+                logger.debug("Skipping %s as it is not smaller than %s", affected_file, other_file)
                 return
 
         # execute changes or write a log
@@ -426,7 +466,7 @@ class Deduplidog:
                     affected_file.rename(target_path)
                     msg = "renaming"
             if self.bashify:
-                print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")  # TODO check
+                print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")
             self.passed_away.add(affected_file)
         change[affected_file].append(msg)
 
@@ -437,7 +477,7 @@ class Deduplidog:
                 affected_file.unlink()
                 msg = "deleting"
             if self.bashify:
-                print(f"rm {_qp(affected_file)}")  # TODO check
+                print(f"rm {_qp(affected_file)}")
             self.passed_away.add(affected_file)
         change[affected_file].append(msg)
 
@@ -488,8 +528,8 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.ignore_date
-                    or wst.st_mtime == ost.st_mtime
-                    or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
+                        or wst.st_mtime == ost.st_mtime
+                        or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
                     ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 
@@ -554,7 +594,7 @@ class Deduplidog:
     @staticmethod
     @cache
     def build_originals(original_dir: str | Path, suffixes: bool | tuple[str]):
-        return [p for p in tqdm(Path(original_dir).rglob("*"), desc="Caching original files") if p.is_file() and not p.is_symlink() and (not suffixes or p.suffix.lower() in suffixes)]
+        return [p for p in tqdm(Path(original_dir).rglob("*"), desc="Caching original files", leave=False) if p.is_file() and not p.is_symlink() and (not suffixes or p.suffix.lower() in suffixes)]
 
     def print_changes(self):
         "Prints performed/suggested changes to be inspected in a human readable form."
@@ -775,7 +815,3 @@ def mtime_files_in_dir_according_to_json(dir_, json_dir):
 
 # mtime_files_in_dir_according_to_json("/media/user/disk2/Takeoutuser/Google Photos/Photos from 2019/",
             # "/media/user/disk2/photos_json/")
-
-
-# DISK1_PHOTOS = mdf.file_list
-# NAHRAVKY_LIST = mdf.file_list
