@@ -22,3 +22,6 @@ Pillow = "*"
 textual = "~=0.52.1"
 sh = "*"
 tqdm = "*"
+
+[tool.poetry.scripts]
+deduplidog= "deduplidog.__main__:main"

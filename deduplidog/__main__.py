@@ -72,11 +72,15 @@ def cli(dd: Deduplidog):
     return dd
 
 
-if __name__ == "__main__":
+def main():
+    global INPUTS
+
     # CLI
     try:
         dd = cli()
-        if input("Continue? [Y/n] ").casefold() not in ("", "y"):
+        if not dd:  # maybe just --help
+            return
+        if input("See more options? [Y/n] ").casefold() not in ("", "y"):
             sys.exit()
     except click.MissingParameter:
         # User launched the program without parameters.
@@ -110,3 +114,6 @@ if __name__ == "__main__":
             continue
         if input("See more options? [Y/n] ").casefold() not in ("y", ""):
             break
+
+if __name__ == "__main__":
+    main()
