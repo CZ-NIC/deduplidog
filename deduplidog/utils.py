@@ -15,6 +15,8 @@ from PIL import Image
 from sh import find
 from tqdm.autonotebook import tqdm
 
+__doc__ = """These utils might be useful for public external use."""
+
 
 @cache
 def crc(path: Path):  # undocumented function

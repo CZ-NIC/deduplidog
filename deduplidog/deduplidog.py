@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import re
@@ -11,17 +12,16 @@ from time import sleep
 from typing import Annotated, get_args, get_type_hints
 
 import click
-import imagehash
 from dataclass_click import option
 from humanize import naturaldelta, naturalsize
-from PIL import ExifTags, Image
+from PIL import Image
 from tqdm.autonotebook import tqdm
 
-from .interface_utils import Field
+from .helpers import Field, FileMetadata, keydefaultdict
 from .utils import _qp, crc, get_frame_count
 
 VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv"
-IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif"
+IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif", ".avif", ".webp"
 MEDIA_SUFFIXES = IMAGE_SUFFIXES + VIDEO_SUFFIXES
 
 logger = logging.getLogger(__name__)
@@ -47,9 +47,9 @@ def conversion(_ctx, option, value):
         .convert()
 
 
-def opt(help, default):
+def opt(help, default, process_by_click=True):
     "CLI support"
-    return option(help=help, default=default, type=click.UNPROCESSED, callback=conversion)
+    return option(help=help, default=default, type=None if process_by_click else click.UNPROCESSED, callback=conversion)
 
 
 @dataclass
@@ -59,14 +59,14 @@ class Deduplidog:
 
     Normally, the file must have the same size, date and name. (Name might be just similar if parameters like strip_end_counter are set.)
 
-    If media_magic=True, media files receive different rules: Neither the size nor the date are compared. See its help.
+    If `media_magic=True`, media files receive different rules: Neither the size nor the date are compared. See its help.
     """
 
     work_dir: Annotated[str | Path, option(
         help="""Folder of the files suspectible to be duplicates.""", required=True, type=click.UNPROCESSED)]
     original_dir: Annotated[str | Path, option(
         help="""Folder of the original files. Normally, these files will not be affected.
-        (However, they might get affected by treat_bigger_as_original or set_both_to_older_date).""", default="", type=click.UNPROCESSED)] = ""
+        (However, they might get affected by `treat_bigger_as_original` or `set_both_to_older_date`).""", default="", type=click.UNPROCESSED)] = ""
 
     # Action section
     execute: Annotated[bool, flag(
@@ -74,40 +74,42 @@ class Deduplidog:
     bashify: Annotated[bool, flag(
         """Print bash commands that correspond to the actions that would have been executed if execute were True.
      You can check and run them yourself.""")] = False
-    affect_only_if_smaller: Annotated[bool, flag(
-        """If media_magic=True, all writing actions like rename, replace_with_original, set_both_to_older_date and treat_bigger_as_original
-     are executed only if the affectable file is smaller than the other.""")] = False
     rename: Annotated[bool, flag(
-        """If execute=True, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).
-     Mutually exclusive with replace_with_original and delete.""")] = False
+        """If `execute=True`, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).
+     Mutually exclusive with `replace_with_original` and `delete`.""")] = False
     delete: Annotated[bool, flag(
-        """If execute=True, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).
+        """If `execute=True`, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).
      Mutually exclusive with replace_with_original and rename.""")] = False
     replace_with_original: Annotated[bool, flag(
-        """If execute=True, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).
+        """If `execute=True`, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).
     Mutually exclusive with rename and delete.""")] = False
     set_both_to_older_date: Annotated[bool, flag(
-        "If execute=True, media_magic=True or (media_magic=False and ignore_date=True), both files are set to the older date. Ex: work file get's the original file's date or vice versa.")] = False
+        "If `execute=True`, `media_magic=True` or (media_magic=False and `ignore_date=True`), both files are set to the older date. Ex: work file get's the original file's date or vice versa.")] = False
     treat_bigger_as_original: Annotated[bool, flag(
-        "If execute=True and rename=True and media_magic=True, the original file might be affected (by renaming) if smaller than the work file.")] = False
+        "If `execute=True` and `rename=True` and `media_magic=True`, the original file might be affected (by renaming) if smaller than the work file.")] = False
+    skip_bigger: Annotated[bool, flag(
+        """If `media_magic=True`, all writing actions, such as `rename`, `replace_with_original`, `set_both_to_older_date` and `treat_bigger_as_original`
+     are executed only if the affectable file is smaller (or the same size) than the other.""")] = False
+    skip_empty: Annotated[bool, flag("Skip files with zero size.")] = False
+    neglect_warning: Annotated[bool, flag(
+        "By default, when a file with bigger size or older date should be affected, just warning is generated. Turn this to suppress it.")] = False
 
     # Match section
     casefold: Annotated[bool, flag(
         "Case insensitive file name comparing.")] = False
     checksum: Annotated[bool, flag(
-        """If media_magic=False and ignore_size=False, files will be compared by CRC32 checksum.
+        """If `media_magic=False` and `ignore_size=False`, files will be compared by CRC32 checksum.
     (This mode is considerably slower.)""")] = False
     tolerate_hour: Annotated[int | tuple[int, int] | bool, opt(
-        """When comparing files in work_dir and media_magic=False, tolerate hour difference.
+        """When comparing files in work_dir and `media_magic=False`, tolerate hour difference.
         Sometimes when dealing with FS changes, files might got shifted few hours.
         * bool → -1 .. +1
         * int → -int .. +int
         * tuple → int1 .. int2
-        Ex: tolerate_hour=2 → work_file.st_mtime -7200 ... + 7200 is compared to the original_file.st_mtime """, False)] = False
-    ignore_date: Annotated[bool, flag(
-        "If media_magic=False, files will not be compared by date.")] = False
-    ignore_size: Annotated[bool, flag(
-        "If media_magic=False, files will not be compared by size.")] = False
+        Ex: tolerate_hour=2 → work_file.st_mtime -7200 ... + 7200 is compared to the original_file.st_mtime """, False, False)] = False
+    ignore_name: Annotated[bool, flag("Files will not be compared by stem nor suffix.")] = False
+    ignore_date: Annotated[bool, flag("If `media_magic=False`, files will not be compared by date.")] = False
+    ignore_size: Annotated[bool, flag("If `media_magic=False`, files will not be compared by size.")] = False
     space2char: Annotated[bool, flag(
         """When comparing files in work_dir, consider space as another char. Ex: "file 012.jpg" is compared as "file_012.jpg" """)] = False
     strip_end_counter: Annotated[bool, flag(
@@ -129,7 +131,12 @@ class Deduplidog:
     accepted_img_hash_diff: Annotated[int, opt(
         "Used only when media_magic is True", 1)] = 1
     img_compare_date: Annotated[bool, flag(
-        "If True and media_magic=True, the file date or the EXIF date must match.")] = False
+        "If True and `media_magic=True`, the work file date or the work file EXIF date must match the original file date (has to be no more than an hour around).")] = False
+
+    # Helper section
+    log_level: Annotated[int, opt("10 debug .. 50 critical", logging.WARNING, 1)] = logging.WARNING
+
+    # TODO output of log and of bashize should be outputtable to a file
 
     # Following parameters are undocumented:
 
@@ -145,7 +152,6 @@ class Deduplidog:
     fail_on_error: bool = False
     shorter_log: bool = True
     "TODO deprecated If True, common prefix of the file names are not output to the log to save space."
-    logging_level: int = logging.WARNING
 
     ending_counter = re.compile(r"\(\d+\)$")
 
@@ -155,9 +161,9 @@ class Deduplidog:
         return f'Deduplidog({text})'
 
     def __post_init__(self):
-        logging.basicConfig(level=self.logging_level, format="%(message)s", force=True)
-        logger.setLevel(self.logging_level)
-        [handler.setLevel(self.logging_level) for handler in logger.handlers]
+        logging.basicConfig(level=self.log_level, format="%(message)s", force=True)
+        logger.setLevel(self.log_level)
+        [handler.setLevel(self.log_level) for handler in logger.handlers]
 
         self.changes: list[Change] = []
         "Path to the files to be changed and path to the original file and status"
@@ -175,35 +181,14 @@ class Deduplidog:
         "What unsuccessful candidates did work files have?"
         self.bar: tqdm | None = None
         "Work files iterator"
-        match self.tolerate_hour:
-            case True:
-                self.tolerate_hour = -1, 1
-            case n if isinstance(n, int):
-                self.tolerate_hour = -abs(n), abs(n)
-            case n if isinstance(n, tuple) and all(isinstance(x, int) for x in n):
-                pass
-            case _:
-                raise AssertionError("Use whole hours only")
         self._files_cache: dict[str, set[Path]] = defaultdict(set)
         "Original files, grouped by stem"
-
+        self.metadata: dict[Path, FileMetadata] = keydefaultdict(FileMetadata)
+        "File metadata like stat() (which is not cached by default)"
         self._common_prefix_length = 0
         " TODO deprecated"
-
-        # Distinguish paths
-        if not self.original_dir:
-            self.original_dir = self.work_dir
-        if not self.work_dir:
-            raise AssertionError("Missing work_dir")
-        else:
-            for a, b in zip(Path(self.work_dir).parts, Path(self.original_dir).parts):
-                if a != b:
-                    self.work_dir_name = a
-                    self.original_dir_name = b
-                    break
-            else:
-                self.work_dir_name = a
-                self.original_dir_name = "(same superdir)"
+        self.original_dir_name = self.work_dir_name = None
+        "Shortened name, human readable"
 
         self.check()
         self.perform()
@@ -219,9 +204,21 @@ class Deduplidog:
         print("Number of originals:", len(self.file_list))
 
         self._files_cache.clear()
-        for p in self.file_list:
-            p_case = Path(str(p).casefold()) if self.casefold else p
-            self._files_cache[p_case.stem[:self.work_file_stem_shortened]].add(p)
+        if not self.ignore_name:
+            for p in self.file_list:
+                p_case = Path(str(p).casefold()) if self.casefold else p
+                self._files_cache[p_case.stem[:self.work_file_stem_shortened]].add(p)
+        elif self.media_magic:
+            # We preload the metadata cache, since we think there will be a lot of candidates.
+            # This is because media_magic does not use date nor size file filtering so evaluating the first work_file might
+            # take ages. Here, we put a nice progress bar.
+            # Strangely, using multiprocessing seems to have no benefit. It must be just IO demanding and the hashing function is quick.
+            images = [x for x in self.file_list if x.suffix.lower() in IMAGE_SUFFIXES]
+            with ThreadPoolExecutor() as executor:
+                list(tqdm(executor.map(
+                    lambda orig_file: self.metadata[orig_file].preload(),
+                    images), total=len(images), desc="Caching image hashes"))
+
         self._common_prefix_length = len(os.path.commonprefix([self.original_dir, self.work_dir])) \
             if self.shorter_log else 0
 
@@ -240,8 +237,8 @@ class Deduplidog:
             raise
         finally:
             if self.bar:
-                print(
-                    f"{'Affected' if self.execute else 'Affectable'}: {self.affected_count}/{len(self.file_list)- self.ignored_count}", end="")
+                print(f"{'Affected' if self.execute else 'Affectable'}:"
+                      f" {self.affected_count}/{len(self.file_list)- self.ignored_count}", end="")
                 if self.ignored_count:
                     print(f" ({self.ignored_count} ignored)", end="")
                 print("\nAffected size:", naturalsize(self.size_affected))
@@ -270,15 +267,46 @@ class Deduplidog:
 
     def check(self):
         """ Checks setup and prints out the description. """
-        if self.affect_only_if_smaller and not self.media_magic:
-            raise AssertionError("The affect_only_if_smaller works only with media_magic")
+
+        # Distinguish paths
+        if not self.original_dir:
+            self.original_dir = self.work_dir
+        if not self.work_dir:
+            raise AssertionError("Missing work_dir")
+        else:
+            for a, b in zip(Path(self.work_dir).parts, Path(self.original_dir).parts):
+                if a != b:
+                    self.work_dir_name = a
+                    self.original_dir_name = b
+                    break
+            else:
+                self.work_dir_name = a
+                self.original_dir_name = "(same superdir)"
+
+        if self.skip_bigger and not self.media_magic:
+            raise AssertionError("The skip_bigger works only with media_magic")
+
+        match self.tolerate_hour:
+            case True:
+                self.tolerate_hour = -1, 1
+            case n if isinstance(n, int):
+                self.tolerate_hour = -abs(n), abs(n)
+            case n if isinstance(n, tuple) and all(isinstance(x, int) for x in n):
+                pass
+            case _:
+                raise AssertionError("Use whole hours only")
+
+        if self.ignore_name and self.ignore_date and self.ignore_size:
+            raise AssertionError("You cannot ignore everything.")
 
         if self.media_magic:
-            print("Only files with media suffixes are taken into consideration. Nor the size or date is compared.")
+            print("Only files with media suffixes are taken into consideration."
+                  f" Nor the size nor the date is compared.{' Nor the name!' if self.ignore_name else ''}")
         else:
             if self.ignore_size and self.checksum:
                 raise AssertionError("Checksum cannot be counted when ignore_size.")
             used, ignored = (", ".join(filter(None, x)) for x in zip(
+                self.ignore_name and ("", "name") or ("name", ""),
                 self.ignore_size and ("", "size") or ("size", ""),
                 self.ignore_date and ("", "date") or ("date", ""),
                 self.checksum and ("crc32", "") or ("", "crc32")))
@@ -287,9 +315,10 @@ class Deduplidog:
         which = f"either the file from the work dir at '{self.work_dir_name}' or the original dir at '{self.original_dir_name}' (whichever is bigger)" \
             if self.treat_bigger_as_original \
             else f"duplicates from the work dir at '{self.work_dir_name}'"
-        small = " (only if smaller than the pair file)" if self.affect_only_if_smaller else ""
+        small = " (only if smaller than the pair file)" if self.skip_bigger else ""
+        nonzero = " with non-zero size" if self.skip_empty else ""
         action = "will be" if self.execute else f"would be (if execute were True)"
-        print(f"{which.capitalize()}{small} {action} ", end="")
+        print(f"{which.capitalize()}{small}{nonzero} {action} ", end="")
 
         match self.rename, self.replace_with_original, self.delete:
             case False, False, False:
@@ -305,6 +334,7 @@ class Deduplidog:
 
         if self.set_both_to_older_date:
             print("Original file mtime date might be set backwards to the duplicate file.")
+        print("")  # sometimes, this line is consumed
 
     def _loop_files(self):
         work_dir, skip = self.work_dir, self.skip
@@ -351,6 +381,10 @@ class Deduplidog:
             stem = stem.casefold()
 
         if work_file.is_symlink() or self.suffixes and work_file.suffix.lower() not in self.suffixes:
+            logger.debug("Skipping symlink or a non-wanted suffix: %s", work_file)
+            return
+        if self.skip_empty and not work_file.stat().st_size:
+            logger.debug("Skipping zero size: %s", work_file)
             return
 
         # print stats
@@ -360,7 +394,7 @@ class Deduplidog:
                          })
 
         # candidate = name matches
-        _candidates_fact = (p for p in self._files_cache[stem] if
+        _candidates_fact = (p for p in (self.file_list if self.ignore_name else self._files_cache[stem]) if
                             work_file != p
                             and p not in self.passed_away)
 
@@ -391,7 +425,7 @@ class Deduplidog:
         # which file will be affected? The work file or the mistakenly original file?
         change = {work_file: [], original: []}
         affected_file, other_file = work_file, original
-        warning = False
+        warning: Path | bool = False
         if affected_file == other_file:
             logger.error("Error, the file is the same", affected_file)
             return
@@ -404,14 +438,12 @@ class Deduplidog:
                     affected_file, other_file = original, work_file
                 case False, True:
                     change[work_file].append(f"SIZE WARNING {naturalsize(work_size-orig_size)}")
-                    warning = True
-            if self.affect_only_if_smaller and affected_file.stat().st_size >= other_file.stat().st_size:
+                    warning = work_file
+            if self.skip_bigger and affected_file.stat().st_size > other_file.stat().st_size:
                 logger.debug("Skipping %s as it is not smaller than %s", affected_file, other_file)
                 return
 
         # execute changes or write a log
-        self.size_affected += affected_file.stat().st_size
-        self.affected_count += 1
 
         # setting date
         affected_date, other_date = affected_file.stat().st_mtime, other_file.stat().st_mtime
@@ -422,26 +454,35 @@ class Deduplidog:
                     self._change_file_date(affected_file, affected_date, other_date, change)
                 elif other_date > affected_date:
                     self._change_file_date(other_file, other_date, affected_date, change)
-            case False, True if (other_date > affected_date):
-                # attention, we do not want to tamper dates however the file marked as duplicate has
-                # lower timestamp (which might be genuine)
+            case False, True if other_date > affected_date and other_date-affected_date >= 1:
+                # Attention, we do not want to tamper dates however the file marked as duplicate has
+                # lower timestamp (which might be hint it is the genuine one).
+                # However, too often I came into the cases when the difference was lower than a second.
+                # So we neglect a lower-than-a-second difference.
                 change[other_file].append(f"DATE WARNING + {naturaldelta(other_date-affected_date)}")
-                warning = True
+                warning = other_file
 
-        # other actions
-        if self.rename:
-            self._rename(change, affected_file)
+        if warning and not self.neglect_warning:
+            change[warning].append("🛟skipped on warning")
+        else:
+            self.size_affected += affected_file.stat().st_size
+            self.affected_count += 1
 
-        if self.delete:
-            self._delete(change, affected_file)
+            # other actions
+            if self.rename:
+                self._rename(change, affected_file)
 
-        if self.replace_with_original:
-            self._replace_with_original(change, affected_file, other_file)
+            if self.delete:
+                self._delete(change, affected_file)
+
+            if self.replace_with_original:
+                self._replace_with_original(change, affected_file, other_file)
 
         self.changes.append(change)
         if warning:
             self.warning_count += 1
-        if (warning and self.logging_level <= logging.WARNING) or (self.logging_level <= logging.INFO):
+        if (warning and self.log_level <= logging.WARNING) or (self.log_level <= logging.INFO):
+            self.bar.clear()  # this looks the same from jupyter and much better from terminal (does not leave a trace of abandoned bars)
             self._print_change(change)
 
     def _rename(self, change: Change, affected_file: Path):
@@ -462,6 +503,7 @@ class Deduplidog:
             if self.bashify:
                 print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")
             self.passed_away.add(affected_file)
+            self.metadata.pop(affected_file, None)
         change[affected_file].append(msg)
 
     def _delete(self, change: Change, affected_file: Path):
@@ -473,6 +515,7 @@ class Deduplidog:
             if self.bashify:
                 print(f"rm {_qp(affected_file)}")
             self.passed_away.add(affected_file)
+            self.metadata.pop(affected_file, None)
         change[affected_file].append(msg)
 
     def _replace_with_original(self, change: Change, affected_file: Path, other_file: Path):
@@ -492,6 +535,7 @@ class Deduplidog:
                 # TODO check
                 print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
         change[affected_file].append(msg)
+        self.metadata.pop(affected_file, None)
 
     def _change_file_date(self, path, old_date, new_date, change: Change):
         # Consider following usecase:
@@ -505,6 +549,7 @@ class Deduplidog:
                             datetime.fromtimestamp(old_date), "->", datetime.fromtimestamp(new_date)))
         if self.execute:
             os.utime(path, (new_date,)*2)  # change access time, modification time
+            self.metadata.pop(path, None)
         if self.bashify:
             print(f"touch -t {new_date} {_qp(path)}")  # TODO check
 
@@ -522,60 +567,48 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.ignore_date
-                or wst.st_mtime == ost.st_mtime
-                or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
-                ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
+                        or wst.st_mtime == ost.st_mtime
+                        or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
+                    ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 
     def _find_similar_media(self,  work_file: Path, comparing_image: bool, candidates: list[Path]):
         similar = False
-        ref_time = False
-        work_pil = None
+        work_cache = self.metadata[work_file]
         if self.debug:
             print("File", work_file, "\n", "Candidates", candidates)
-        for original in candidates:
-            if not original.exists():
+        for orig_file in candidates:
+            if not orig_file.exists():
                 continue
             if comparing_image:  # comparing images
-                if not ref_time:
-                    ref_time = work_file.stat().st_mtime
-                    work_pil = Image.open(work_file)
-                similar = self.image_similar(original, work_file, work_pil, ref_time)
+                similar = self.image_similar(self.metadata[orig_file], work_cache)
             else:  # comparing videos
-                frame_delta = abs(get_frame_count(work_file) - get_frame_count(original))
+                frame_delta = abs(get_frame_count(work_file) - get_frame_count(orig_file))
                 similar = frame_delta <= self.accepted_frame_delta
                 if not similar and self.debug:
-                    print("Frame delta:", frame_delta, work_file, original)
+                    print("Frame delta:", frame_delta, work_file, orig_file)
             if similar:
                 break
-        return original if similar else False
+        work_cache.clean()
+        return orig_file if similar else False
 
-    def image_similar(self, original: Path, work_file: Path, work_pil: Image, ref_time: float):
+    def image_similar(self, orig_cache: FileMetadata, work_cache: FileMetadata):
         """ Returns true if images are similar.
             When? If their image hash difference are relatively small.
-            XIf original ref_time set
-                ref_time: the file date of the investigated file f or its EXIF date
-            has to be no more than an hour around.
         """
         try:
             similar = False
-            original_pil = Image.open(original)
-
             # compare time
             if self.img_compare_date:
-                try:
-                    exif_times = {datetime.strptime(v, '%Y:%m:%d %H:%M:%S').timestamp() for k, v in original_pil._getexif().items() if
-                                  k in ExifTags.TAGS and "DateTime" in ExifTags.TAGS[k]}
-                except:
-                    exif_times = tuple()
-                file_time = original.stat().st_mtime
+                exif_times = orig_cache.exif_times
+                file_time = orig_cache.stat.st_mtime
+                ref_time = work_cache.stat.st_mtime
                 similar = abs(ref_time - file_time) <= 3600 \
                     or any(abs(ref_time - t) <= 3600 for t in exif_times)
-                # print("* čas",similar, original, ref_time, exif_times, file_time)
 
             if similar or not self.img_compare_date:
-                hash0 = imagehash.average_hash(original_pil)
-                hash1 = imagehash.average_hash(work_pil)
+                hash0 = orig_cache.average_hash
+                hash1 = work_cache.average_hash
                 # maximum bits that could be different between the hashes
                 hash_dist = abs(hash0 - hash1)
                 similar = hash_dist <= self.accepted_img_hash_diff
@@ -583,12 +616,17 @@ class Deduplidog:
                     print("Hash distance:", hash_dist)
             return similar
         except OSError as e:
-            print(e, original, work_file)
+            logger.error("OSError %s %s %s", e, orig_cache.file, work_cache.file)
+        finally:
+            orig_cache.clean()
 
     @staticmethod
     @cache
     def build_originals(original_dir: str | Path, suffixes: bool | tuple[str]):
-        return [p for p in tqdm(Path(original_dir).rglob("*"), desc="Caching original files", leave=False) if p.is_file() and not p.is_symlink() and (not suffixes or p.suffix.lower() in suffixes)]
+        return [p for p in tqdm(Path(original_dir).rglob("*"), desc="Caching original files", leave=False)
+                if p.is_file()
+                and not p.is_symlink()
+                and (not suffixes or p.suffix.lower() in suffixes)]
 
     def print_changes(self):
         "Prints performed/suggested changes to be inspected in a human readable form."
@@ -602,4 +640,3 @@ class Deduplidog:
         [print(text, *(str(s) for s in changes))
             for text, changes in zip((f"  {wicon}{self.work_dir_name}:",
                                       f"  {oicon}{self.original_dir_name}:"), change.values()) if len(changes)]
-

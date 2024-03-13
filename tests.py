@@ -129,9 +129,9 @@ class TestDeduplidog(TestCase):
         state.check(suck=(4, 5, 6, 7, 8, 9, 11))
 
     #  No media file in the test case.
-    # def test_affect_only_if_smaller(self):
+    # def test_skip_bigger(self):
     #     state = self.prepare()
-    #     Deduplidog(*state, rename=True, execute=True, ignore_date=True, affect_only_if_smaller=True, media_magic=True)
+    #     Deduplidog(*state, rename=True, execute=True, ignore_date=True, skip_bigger=True, `media_magic=True`)
     #     state.check()
 
 
