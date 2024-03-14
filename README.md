@@ -52,6 +52,8 @@ from deduplidog import Deduplidog
 Deduplidog("/home/user/duplicates", "/media/disk/origs", ignore_date=True, rename=True)
 ```
 
+This command produced the following output:
+
 ```
 Find files by size, ignoring: date, crc32
 Duplicates from the work dir at 'home' would be (if execute were True) renamed (prefixed with ✓).
@@ -59,16 +61,17 @@ Number of originals: 38
 * /home/user/duplicates/foo.txt
   /media/disk/origs/foo.txt
   🔨home: renamable
-  📄media: DATE WARNING + a day
-Affectable: 38/38
-Affected size: 59.9 kB
+  📄media: DATE WARNING + a day 🛟skipped on warning
+Affectable: 37/38
+Affected size: 56.9 kB
 Warnings: 1
 ```
 
-We found out all the files in the *duplicates* folder seem to be useless but one. It's date is earlier than the original one. See with full log.
+We found out all the files in the *duplicates* folder seem to be useless but one. It's date is earlier than the original one. The life buoy icon would prevent any action. To suppress this, let's turn on `set_both_to_older_date`. See with full log.
 
 ```python3
-Deduplidog("/home/user/duplicates", "/media/disk/origs", ignore_date=True, rename=True, set_both_to_older_date=True, log_level=logging.INFO)
+Deduplidog("/home/user/duplicates", "/media/disk/origs",
+   ignore_date=True, rename=True, set_both_to_older_date=True, log_level=logging.INFO)
 ```
 
 ```
@@ -94,7 +97,8 @@ Affected size: 59.9 kB
 You see, the log is at the most brief, yet transparent form. The files to be affected at the work folder are prepended with the 🔨 icon whereas those affected at the original folder uses 📄 icon. We might add `execute=True` parameter to perform the actions. Or use `bashify=True` to inspect.
 
 ```python3
-Deduplidog("/home/user/duplicates", "/media/disk/origs", ignore_date=True, rename=True, set_both_to_older_date=True, bashify=True)
+Deduplidog("/home/user/duplicates", "/media/disk/origs",
+  ignore_date=True, rename=True, set_both_to_older_date=True, bashify=True)
 ```
 
 The `bashify=True` just produces the commands we might use.
@@ -146,6 +150,7 @@ Find the duplicates. Normally, the file must have the same size, date and name. 
 | strip_end_counter | bool | False | When comparing files in work_dir, strip the counter. Ex: "00034(3).MTS" is compared as "00034.MTS"  |
 | strip_suffix | str | False | When comparing files in work_dir, strip the file name end matched by a regular. Ex: "001-edited.jpg" is compared as "001.jpg"  |
 | work_file_stem_shortened | int | None | Photos downloaded from Google have its stem shortened to 47 chars. For the comparing purpose, treat original folder file names shortened. |
+| invert_selection | bool | False | Match only those files from work_dir that does not match the criterions. |
 | **Media** |
 | media_magic | bool | False | Nor the size or date is compared for files with media suffixes.<br>A video is considered a duplicate if it has the same name and a similar number of frames, even if it has a different extension.<br>An image is considered a duplicate if it has the same name and a similar image hash, even if the files are of different sizes.<br>(This mode is considerably slower.) |
 | accepted_frame_delta | int | 1 | Used only when media_magic is True |
@@ -153,6 +158,7 @@ Find the duplicates. Normally, the file must have the same size, date and name. 
 | img_compare_date | bool | False | If True and `media_magic=True`, the work file date or the work file EXIF date must match the original file date (has to be no more than an hour around). |
 | **Helper** |
 | log_level | int | 30 (warning) | 10 debug .. 50 critical |
+| output | bool | False | Stores the output log to a file in the current working directory. (Never overwrites an older file.) |
 
 ## Utils
 In the `deduplidog.utils` packages, you'll find a several handsome tools to help you. You will find parameters by using you IDE hints.

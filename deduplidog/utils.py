@@ -39,6 +39,18 @@ def _qp(path: Path):
     s = str(path)
     return f'"{s}"' if " " in s else s
 
+def open_log_file(name):  # undocumented functions
+    log_file_path = Path(f"{name}.log")
+    try:
+        return log_file_path.open("x")
+    except FileExistsError:
+        counter = 1
+        while True:
+            new_file_path = Path(f"{name} ({counter}).log")
+            try:
+                return new_file_path.open("x")
+            except FileExistsError:
+                counter += 1
 
 def images(urls: Iterable[str | Path]):
     """ Display a ribbon of images. """

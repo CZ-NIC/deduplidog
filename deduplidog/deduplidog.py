@@ -1,3 +1,4 @@
+from contextlib import redirect_stdout
 import logging
 import os
 import re
@@ -19,7 +20,7 @@ from pillow_heif import register_heif_opener
 from tqdm.autonotebook import tqdm
 
 from .helpers import Field, FileMetadata, keydefaultdict
-from .utils import _qp, crc, get_frame_count
+from .utils import _qp, crc, get_frame_count, open_log_file
 
 VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv", ".hevc"
 IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif", ".avif", ".webp", ".heic", ".avif"
@@ -122,6 +123,8 @@ class Deduplidog:
         """When comparing files in work_dir, strip the file name end matched by a regular. Ex: "001-edited.jpg" is compared as "001.jpg" """, False)] = False
     work_file_stem_shortened: Annotated[int, opt(
         "Photos downloaded from Google have its stem shortened to 47 chars. For the comparing purpose, treat original folder file names shortened.", None)] = None
+    invert_selection: Annotated[bool, flag(
+        "Match only those files from work_dir that does not match the criterions.")] = False
 
     # Media section
     media_magic: Annotated[bool, flag(
@@ -139,8 +142,10 @@ class Deduplidog:
 
     # Helper section
     log_level: Annotated[int, opt("10 debug .. 50 critical", logging.WARNING, 1)] = logging.WARNING
+    output: Annotated[bool, flag(
+        "Stores the output log to a file in the current working directory. (Never overwrites an older file.)")] = False
 
-    # TODO output of log and of bashize should be outputtable to a file
+    # TODO bashize should be outputtable through output
 
     # Following parameters are undocumented:
 
@@ -193,6 +198,10 @@ class Deduplidog:
         " TODO deprecated"
         self.original_dir_name = self.work_dir_name = None
         "Shortened name, human readable"
+        self.same_superdir = False
+        """ Work_dir and original dir is the same """
+        self._output = None
+        " Log buffer "
 
         self.check()
         self.perform()
@@ -221,11 +230,17 @@ class Deduplidog:
         self._common_prefix_length = len(os.path.commonprefix([self.original_dir, self.work_dir])) \
             if self.shorter_log else 0
 
+        if self.output:
+            name = ",".join([self.original_dir_name, self.work_dir_name] +
+                            [p for p, v in vars(self).items() if v is True])[:150]
+            self._output = open_log_file(name)
         try:
             self._loop_files()
         except:
             raise
         finally:
+            if self._output:
+                self._output.close()
             if self.bar:
                 print(f"{'Affected' if self.execute else 'Affectable'}:"
                       f" {self.affected_count}/{len(self.file_list)- self.ignored_count}", end="")
@@ -257,17 +272,22 @@ class Deduplidog:
         if not self.work_dir:
             raise AssertionError("Missing work_dir")
         else:
+            self.same_superdir = False
             for a, b in zip(Path(self.work_dir).parts, Path(self.original_dir).parts):
                 if a != b:
                     self.work_dir_name = a
                     self.original_dir_name = b
                     break
             else:
-                self.work_dir_name = a
-                self.original_dir_name = "(same superdir)"
+                self.same_superdir = True
+                self.original_dir_name = self.work_dir_name = a
 
         if self.skip_bigger and not self.media_magic:
             raise AssertionError("The skip_bigger works only with media_magic")
+
+        if self.invert_selection and any((self.replace_with_original, self.treat_bigger_as_original, self.set_both_to_older_date)):
+            raise AssertionError(
+                "It does not make sense using invert_selection with this command. The work file has no file to compare to.")
 
         match self.tolerate_hour:
             case True:
@@ -295,7 +315,8 @@ class Deduplidog:
                 self.checksum and ("crc32", "") or ("", "crc32")))
             print(f"Find files by {used}{f', ignoring: {ignored}' if ignored else ''}")
 
-        which = f"either the file from the work dir at '{self.work_dir_name}' or the original dir at '{self.original_dir_name}' (whichever is bigger)" \
+        dirs_ = "" if self.same_superdir else f" at '{self.work_dir_name}' or the original dir at '{self.original_dir_name}'"
+        which = f"either the file from the work dir{dirs_} (whichever is bigger)" \
             if self.treat_bigger_as_original \
             else f"duplicates from the work dir at '{self.work_dir_name}'"
         small = " (only if smaller than the pair file)" if self.skip_bigger else ""
@@ -321,7 +342,8 @@ class Deduplidog:
 
     def _loop_files(self):
         work_dir, skip = self.work_dir, self.skip
-        work_files = [f for f in tqdm(Path(work_dir).rglob("*"), desc="Caching working files")]
+        work_files = [f for f in tqdm((p for p in Path(work_dir).rglob(
+            "*") if not p.is_dir()), desc="Caching working files")]
         if skip:
             if isinstance(work_files, list):
                 work_files = work_files[skip:]
@@ -398,8 +420,10 @@ class Deduplidog:
 
         # original of the work_file has been found
         # one of them might be treated as a duplicate and thus affected
-        if original:
+        if original and not self.invert_selection:
             self._affect(work_file, original)
+        elif not original and self.invert_selection:
+            self._affect(work_file, Path("/dev/null"))
         elif len(candidates) > 1:  # we did not find the object amongst multiple candidates
             self.having_multiple_candidates[work_file] = candidates
             logger.debug("Candidates %s %s", work_file, candidates)
@@ -467,6 +491,9 @@ class Deduplidog:
         if (warning and self.log_level <= logging.WARNING) or (self.log_level <= logging.INFO):
             self.bar.clear()  # this looks the same from jupyter and much better from terminal (does not leave a trace of abandoned bars)
             self._print_change(change)
+        if self._output:
+            with redirect_stdout(self._output):
+                self._print_change(change)
 
     def _rename(self, change: Change, affected_file: Path):
         msg = "renamable"
@@ -616,10 +643,24 @@ class Deduplidog:
         [self._print_change(change) for change in self.changes]
 
     def _print_change(self, change: Change):
+        """ We aim for the clearest representation to help the user orientate at a glance.
+        Because file paths can be long, we'll display them as succinctly as possible.
+        Sometimes we'll use, for example, the disk name, other times we'll use file names,
+        or the first or last differing part of the path. """
         wicon, oicon = "🔨", "📄"
         wf, of = change
+
+        # Nice paths
+        wn, on = self.work_dir_name, self.original_dir_name  # meaningful dir representation
+        if self.same_superdir:
+            if wf.name == of.name:  # full path that makes the difference
+                len_ = len(os.path.commonprefix((wf, of)))
+                wn, on = str(wf.parent)[len_:] or "(basedir)", str(of.parent)[len_:] or "(basedir)"
+            else:  # the file name will make the meaningful difference
+                wn, on = wf.name, of.name
+
         print("*", wf)
         print(" ", of)
         [print(text, *(str(s) for s in changes))
-            for text, changes in zip((f"  {wicon}{self.work_dir_name}:",
-                                      f"  {oicon}{self.original_dir_name}:"), change.values()) if len(changes)]
+            for text, changes in zip((f"  {wicon}{wn}:",
+                                      f"  {oicon}{on}:"), change.values()) if len(changes)]

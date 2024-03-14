@@ -74,15 +74,15 @@ class FolderState:
 class TestDeduplidog(TestCase):
 
     def prepare(self, testing_dir: str = None):
-        self.temp = TemporaryDirectory()
-        temp = Path(testing_dir) if testing_dir else self.temp.name
+        self.temp = mkdtemp()  # TemporaryDirectory() TODO
+        # temp = Path(testing_dir) if testing_dir else self.temp.name TODO
+        temp = str(self.temp)
         originals = Path(temp, "originals")
         work_dir = Path(temp, "work_dir")
         if not testing_dir:
             originals.mkdir()
             work_dir.mkdir()
 
-        # c = FileRepresentationController(temp)
         original_files = {name: FileRepresentation(originals / name).write()
                           for name in (f"file_{i}" for i in range(12))}
         work_files = {name: FileRepresentation(work_dir / name, *rest).write() for name, *rest in (
@@ -107,26 +107,46 @@ class TestDeduplidog(TestCase):
 
     def test_date(self):
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, ignore_date=True)
+        Deduplidog(*state, rename=True, execute=True, ignore_date=True, neglect_warning=True)
         state.check(prefixed=(4, 5, 6, 7, 8, 9, 10, 11))
+        state = self.prepare()
+        Deduplidog(*state, rename=True, execute=True, ignore_date=True)
+        state.check(prefixed=(4, 5, 6, 7, 11))
 
+        state = self.prepare()
+        Deduplidog(*state, rename=True, execute=True, tolerate_hour=1, neglect_warning=True)
+        state.check(prefixed=(4, 7, 8, 9, 11))
         state = self.prepare()
         Deduplidog(*state, rename=True, execute=True, tolerate_hour=1)
-        state.check(prefixed=(4, 7, 8, 9, 11))
+        state.check(prefixed=(4, 7, 11))
 
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2)
+        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2, neglect_warning=True)
         state.check(prefixed=(4, 5, 6, 7, 8, 9, 11))
+        state = self.prepare()
+        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2)
+        state.check(prefixed=(4, 5, 6, 7, 11))
 
     def test_replace_with_original(self):
         state = self.prepare()
-        Deduplidog(*state, replace_with_original=True, execute=True)
+        Deduplidog(*state, replace_with_original=True, execute=True, neglect_warning=True)
         state.work_files["file_11"].suck(state.originals["file_11"])
         state.check()
 
         state = self.prepare()
-        Deduplidog(*state, replace_with_original=True, execute=True, tolerate_hour=2)
+        Deduplidog(*state, replace_with_original=True, execute=True, tolerate_hour=2, neglect_warning=True)
         state.check(suck=(4, 5, 6, 7, 8, 9, 11))
+
+    def test_invert_selection(self):
+        state = self.prepare()
+        self.assertRaises(AssertionError, Deduplidog,
+                          *state, replace_with_original=True, execute=True, tolerate_hour=2,  invert_selection=True)
+        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2,  neglect_warning=True, invert_selection=False)
+        state.check(prefixed=(4, 5, 6, 7, 8, 9, 11))
+
+        state = self.prepare()
+        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2,  neglect_warning=True, invert_selection=True)
+        state.check(prefixed=(1, 2, 10))
 
     #  No media file in the test case.
     # def test_skip_bigger(self):
