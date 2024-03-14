@@ -1,9 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import re
 import shutil
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cache
@@ -15,19 +15,21 @@ import click
 from dataclass_click import option
 from humanize import naturaldelta, naturalsize
 from PIL import Image
+from pillow_heif import register_heif_opener
 from tqdm.autonotebook import tqdm
 
 from .helpers import Field, FileMetadata, keydefaultdict
 from .utils import _qp, crc, get_frame_count
 
-VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv"
-IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif", ".avif", ".webp"
+VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv", ".hevc"
+IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif", ".avif", ".webp", ".heic", ".avif"
 MEDIA_SUFFIXES = IMAGE_SUFFIXES + VIDEO_SUFFIXES
 
 logger = logging.getLogger(__name__)
 Change = dict[Path, list[str | datetime]]
 "Lists changes performed/suggested to given path. First entry is the work file, the second is the original file."
 
+register_heif_opener()
 
 # Unfortunately, instead of writing brief docstrings, Python has no regular way to annotate dataclass attributes.
 # As mere strings are not kept in the runtime, we have to use cubersome Annotated syntax.
@@ -35,6 +37,8 @@ Change = dict[Path, list[str | datetime]]
 # Cons:
 #   Help text is not displayed during static analysis (as an IDE hint).
 #   We have to write the default value twice. (For the CLI and for the direct import to i.e. a jupyter notebook.)
+
+
 def flag(help):
     "CLI support"
     return option(help=help, is_flag=True, default=False)
@@ -212,24 +216,10 @@ class Deduplidog:
             # We preload the metadata cache, since we think there will be a lot of candidates.
             # This is because media_magic does not use date nor size file filtering so evaluating the first work_file might
             # take ages. Here, we put a nice progress bar.
-            # Strangely, using multiprocessing seems to have no benefit. It must be just IO demanding and the hashing function is quick.
-            images = [x for x in self.file_list if x.suffix.lower() in IMAGE_SUFFIXES]
-            with ThreadPoolExecutor() as executor:
-                list(tqdm(executor.map(
-                    lambda orig_file: self.metadata[orig_file].preload(),
-                    images), total=len(images), desc="Caching image hashes"))
+            self.preload_metadata(self.file_list)
 
         self._common_prefix_length = len(os.path.commonprefix([self.original_dir, self.work_dir])) \
             if self.shorter_log else 0
-
-        # loop all files in the work dir and check them for duplicates amongst originals
-        # try#
-        # concurrent worker to rename files
-        # we suppose this might be quicker than waiting the renaming IO action is done
-        # BUT IT IS NOT AT ALL
-        # self.queue = Queue()
-        # worker = Thread(target=self._rename_worker, args=(self.queue,))
-        # worker.start()
 
         try:
             self._loop_files()
@@ -246,24 +236,17 @@ class Deduplidog:
                     print(f"Warnings: {self.warning_count}")
                 if self.having_multiple_candidates:
                     print("Unsuccessful files having multiple candidates length:", len(self.having_multiple_candidates))
-        #    self.queue.put(None)
-        #    worker.join()
-        #    print("Worker finished")
 
-    # def _rename_worker(self, queue):
-    #    while True:
-    #        sleep(1)
-    #        item = queue.get()
-    #        if item is None:
-    #            break
-    #
-    #        source_file, target_file = item
-    #
-    #        #affected_file.rename(affected_file.with_name("✓" + affected_file.name))
-    #        source_file.rename(target_file)
-    #        #print(f'>got {source_file} > {target_file}')
-    #
-    #    print('Renaming finished')
+    def preload_metadata(self, files: list[Path]):
+        """ Populate self.metadata with performance-intensive file information """
+        # Strangely, when I removed cached_properties from FileMetadata in order to be serializable for multiprocesing,
+        # using ThreadPoolExecutor is just as quick as ProcessPoolExecutor. And it spans multiple processes too.
+        # I thought ThreadPoolExecutor spans just threads.
+        images = [x for x in files if x.suffix.lower() in IMAGE_SUFFIXES]
+        with ProcessPoolExecutor() as executor:
+            for file, *args in tqdm(executor.map(FileMetadata.preload, images),
+                                    total=len(images), desc="Caching image hashes"):
+                self.metadata[file] = FileMetadata(file, *args)
 
     def check(self):
         """ Checks setup and prints out the description. """
@@ -567,8 +550,8 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.ignore_date
-                        or wst.st_mtime == ost.st_mtime
-                        or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
+                    or wst.st_mtime == ost.st_mtime
+                    or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
                     ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 

@@ -2,13 +2,14 @@ from ast import literal_eval
 from collections import defaultdict
 from dataclasses import _MISSING_TYPE, dataclass
 from datetime import datetime
-from functools import cache, cached_property
+from functools import cache
+from os import stat_result
 from pathlib import Path
 from types import UnionType
 from typing import Any, get_args
 
 from PIL import ExifTags, Image
-import imagehash
+from imagehash import ImageHash, average_hash
 from textual.widgets import Checkbox, Input
 
 
@@ -60,39 +61,48 @@ class keydefaultdict(defaultdict):
 @dataclass
 class FileMetadata:
     file: Path
+    _exif_times: set | tuple | None = None
+    _average_hash: ImageHash | None = None
+    _stat: stat_result | None = None
     _pil = None
     cleaned_count = 0
     "Not used, just for debugging: To determine whether the clean up is needed or not."
 
-    @cached_property
+    @property
     def exif_times(self):
-        try:
-            return {datetime.strptime(v, '%Y:%m:%d %H:%M:%S').timestamp()
-                    for k, v in self.get_pil()._getexif().items()
-                    if k in ExifTags.TAGS and "DateTime" in ExifTags.TAGS[k]}
-        except:
-            return tuple()
+        if not self._exif_times:
+            try:
+                self._exif_times = {datetime.strptime(v, '%Y:%m:%d %H:%M:%S').timestamp()
+                                    for k, v in self.get_pil()._getexif().items()
+                                    if k in ExifTags.TAGS and "DateTime" in ExifTags.TAGS[k]}
+            except:
+                self._exif_times = tuple()
+        return self._exif_times
 
-    @cached_property
+    @property
     def average_hash(self):
-        return imagehash.average_hash(self.get_pil())
+        if not self._average_hash:
+            self._average_hash = average_hash(self.get_pil())
+        return self._average_hash
 
-    @cached_property
+    @property
     def stat(self):
-        return self.file.stat()
+        if not self._stat:
+            self._stat = self.file.stat()
+        return self._stat
 
     def get_pil(self):
         if not self._pil:
             self._pil = Image.open(self.file)
         return self._pil
 
-    def preload(self):
+    @classmethod
+    def preload(cls, file):
         """ Preload all values. """
-        self.exif_times
-        self.average_hash
-        self.stat
-        self.clean()  # PIL will never be needed anymore
-        return True
+        o = cls(file)
+        r = file, o.exif_times, o.average_hash, o.stat
+        o.clean()  # PIL will never be needed anymore
+        return r
 
     def clean(self):
         """ As PIL is the most memory consuming, we allow the easy clean up. """
