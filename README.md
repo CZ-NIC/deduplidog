@@ -2,6 +2,19 @@
 
 Yet another file deduplicator.
 
+- [About](#about)
+   * [What are the use cases?](#what-are-the-use-cases)
+   * [What is compared?](#what-is-compared)
+   * [Why not using standard sync tools like meld?](#why-not-using-standard-sync-tools-like-meld)
+   * [Doubts?](#doubts)
+- [Launch](#launch)
+- [Examples](#examples)
+   * [Duplicated files](#duplicated-files)
+   * [Names shuffled](#names-shuffled)
+- [Documentation](#documentation)
+   * [Parameters](#parameters)
+   * [Utils](#utils)
+
 # About
 
 ## What are the use cases?
@@ -34,15 +47,18 @@ These imply the folders have the same structure. Deduplidog is tolerant towards 
 
 ## Doubts?
 
-The program does not write anything to the disk, unless `execute=True` is set. Feel free to launch it just to inspect the recommended actions. Or set `bashify=True` to output bash commands you may launch after thorough examining.
+The program does not write anything to the disk, unless `execute=True` is set. Feel free to launch it just to inspect the recommended actions. Or set `inspect=True` to output bash commands you may launch after thorough examining.
 
 # Launch
+
+Install with `pip install deduplidog`.
 
 It works as a standalone program with both CLI and TUI interfaces. Just launch the `deduplidog` command.
 Moreover, it works best when imported from a [Jupyter Notebook](https://jupyter.org/).
 
 # Examples
 
+## Duplicated files
 Let's take a closer look to a use-case.
 
 ```python3
@@ -94,14 +110,14 @@ Affectable: 38/38
 Affected size: 59.9 kB
 ```
 
-You see, the log is at the most brief, yet transparent form. The files to be affected at the work folder are prepended with the 🔨 icon whereas those affected at the original folder uses 📄 icon. We might add `execute=True` parameter to perform the actions. Or use `bashify=True` to inspect.
+You see, the log is at the most brief, yet transparent form. The files to be affected at the work folder are prepended with the 🔨 icon whereas those affected at the original folder uses 📄 icon. We might add `execute=True` parameter to perform the actions. Or use `inspect=True` to inspect.
 
 ```python3
 Deduplidog("/home/user/duplicates", "/media/disk/origs",
-  ignore_date=True, rename=True, set_both_to_older_date=True, bashify=True)
+  ignore_date=True, rename=True, set_both_to_older_date=True, inspect=True)
 ```
 
-The `bashify=True` just produces the commands we might use.
+The `inspect=True` just produces the commands we might subsequently use.
 
 ```bash
 touch -t 1524754680.0 /media/disk/origs/foo.txt
@@ -109,6 +125,26 @@ mv -n /home/user/duplicates/foo.txt /home/user/duplicates/✓foo.txt
 mv -n /home/user/duplicates/bar.txt /home/user/duplicates/✓bar.txt
 mv -n /home/user/duplicates/third.txt /home/user/duplicates/✓third.txt
 ```
+
+## Names shuffled
+
+You face a directory that might contain some images twice. Let's analyze. We turn on `media_magic` so that we find the scaled down images. We `ignore_name` because the scaled images might have been renamed. We `skip_bigger` files as we examine the only folder and every file pair would be matched twice. That way, we declare the original image is the bigger one. And we set `log_level` verbosity so that we get a list of the affected files.
+
+```
+$ deduplidog --work-dir ~/shuffled/ --media-magic --ignore-name --skip-bigger --log-level=20
+Only files with media suffixes are taken into consideration. Nor the size nor the date is compared. Nor the name!
+Duplicates from the work dir at 'shuffled' (only if smaller than the pair file) would be (if execute were True) left intact (because no action is selected).
+
+Number of originals: 9
+Caching image hashes: 100%|███████████████████████████████████████████████████████████████████████████████████████████████| 9/9 [00:00<00:00, 16.63it/s]
+Caching working files: 9it [00:00, 62497.91it/s]
+* /home/user/shuffled/IMG_20230802_shrink.jpg
+  /home/user/shuffled/IMG_20230802.jpg
+Affectable: 1/9
+Affected size: 636.4 kB
+```
+
+We see there si a single duplicated file whose name is `IMG_20230802_shrink.jpg`.
 
 # Documentation
 
@@ -130,7 +166,7 @@ Find the duplicates. Normally, the file must have the same size, date and name. 
 | original_dir | str \| Path | - | Folder of the original files. Normally, these files will not be affected.<br> (However, they might get affected by `treat_bigger_as_original` or `set_both_to_older_date`). |
 | **Actions** |
 | execute | bool | False | If False, nothing happens, just a safe run is performed. |
-| bashify | bool | False | Print bash commands that correspond to the actions that would have been executed if execute were True.<br>    You can check and run them yourself. |
+| inspect | bool | False | Print bash commands that correspond to the actions that would have been executed if execute were True.<br>    You can check and run them yourself. |
 | rename | bool | False | If `execute=True`, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).<br>Mutually exclusive with `replace_with_original` and `delete`. |
 | delete | bool | False | If `execute=True`, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).<br>Mutually exclusive with replace_with_original and rename. |
 | replace_with_original | bool | False | If `execute=True`, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).<br>Mutually exclusive with rename and delete. |

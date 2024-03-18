@@ -4,7 +4,7 @@ import os
 import re
 import shutil
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cache
@@ -76,7 +76,7 @@ class Deduplidog:
     # Action section
     execute: Annotated[bool, flag(
         "If False, nothing happens, just a safe run is performed.")] = False
-    bashify: Annotated[bool, flag(
+    inspect: Annotated[bool, flag(
         """Print bash commands that correspond to the actions that would have been executed if execute were True.
      You can check and run them yourself.""")] = False
     rename: Annotated[bool, flag(
@@ -255,10 +255,11 @@ class Deduplidog:
     def preload_metadata(self, files: list[Path]):
         """ Populate self.metadata with performance-intensive file information """
         # Strangely, when I removed cached_properties from FileMetadata in order to be serializable for multiprocesing,
-        # using ThreadPoolExecutor is just as quick as ProcessPoolExecutor. And it spans multiple processes too.
-        # I thought ThreadPoolExecutor spans just threads.
+        # using ThreadPoolExecutor is just as quick as ProcessPoolExecutor
+        # as it spans the threads over multiple cores too.
+        # I thought ThreadPoolExecutor spans just on a single core.
         images = [x for x in files if x.suffix.lower() in IMAGE_SUFFIXES]
-        with ProcessPoolExecutor() as executor:
+        with ProcessPoolExecutor(max_workers=2) as executor:
             for file, *args in tqdm(executor.map(FileMetadata.preload, images),
                                     total=len(images), desc="Caching image hashes"):
                 self.metadata[file] = FileMetadata(file, *args)
@@ -326,7 +327,7 @@ class Deduplidog:
 
         match self.rename, self.replace_with_original, self.delete:
             case False, False, False:
-                pass
+                print("left intact (because no action is selected).")
             case True, False, False:
                 print("renamed (prefixed with ✓).")
             case False, True, False:
@@ -497,7 +498,7 @@ class Deduplidog:
 
     def _rename(self, change: Change, affected_file: Path):
         msg = "renamable"
-        if self.execute or self.bashify:
+        if self.execute or self.inspect:
             # self.queue.put((affected_file, affected_file.with_name("✓" + affected_file.name)))
             target_path = affected_file.with_name("✓" + affected_file.name)
             if self.execute:
@@ -510,20 +511,20 @@ class Deduplidog:
                 else:
                     affected_file.rename(target_path)
                     msg = "renaming"
-            if self.bashify:
-                print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")
+            if self.inspect:
+                self._inspect_print(f"mv -n {_qp(affected_file)} {_qp(target_path)}")
             self.passed_away.add(affected_file)
             self.metadata.pop(affected_file, None)
         change[affected_file].append(msg)
 
     def _delete(self, change: Change, affected_file: Path):
         msg = "deletable"
-        if self.execute or self.bashify:
+        if self.execute or self.inspect:
             if self.execute:
                 affected_file.unlink()
                 msg = "deleting"
-            if self.bashify:
-                print(f"rm {_qp(affected_file)}")
+            if self.inspect:
+                self._inspect_print(f"rm {_qp(affected_file)}")
             self.passed_away.add(affected_file)
             self.metadata.pop(affected_file, None)
         change[affected_file].append(msg)
@@ -534,16 +535,16 @@ class Deduplidog:
             if self.execute:
                 msg = "replacing"
                 shutil.copy2(other_file, affected_file)
-            if self.bashify:
-                print(f"cp --preserve {_qp(other_file)} {_qp(affected_file)}")  # TODO check
+            if self.inspect:
+                self._inspect_print(f"cp --preserve {_qp(other_file)} {_qp(affected_file)}")  # TODO check
         else:
             if self.execute:
                 msg = "replacing"
                 shutil.copy2(other_file, affected_file.parent)
                 affected_file.unlink()
-            if self.bashify:
+            if self.inspect:
                 # TODO check
-                print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
+                self._inspect_print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
         change[affected_file].append(msg)
         self.metadata.pop(affected_file, None)
 
@@ -560,8 +561,8 @@ class Deduplidog:
         if self.execute:
             os.utime(path, (new_date,)*2)  # change access time, modification time
             self.metadata.pop(path, None)
-        if self.bashify:
-            print(f"touch -t {new_date} {_qp(path)}")  # TODO check
+        if self.inspect:
+            self._inspect_print(f"touch -t {new_date} {_qp(path)}")  # TODO check
 
     def _path(self, path):
         """ Strips out common prefix that has originals with work_dir for display reasons.
@@ -664,3 +665,9 @@ class Deduplidog:
         [print(text, *(str(s) for s in changes))
             for text, changes in zip((f"  {wicon}{wn}:",
                                       f"  {oicon}{on}:"), change.values()) if len(changes)]
+
+    def _inspect_print(self, text):
+        if self._output:
+            self._output.write(text + "\n")
+        else:
+            print(text)
