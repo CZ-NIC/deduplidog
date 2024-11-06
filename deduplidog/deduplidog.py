@@ -81,13 +81,16 @@ class Deduplidog:
      You can check and run them yourself.""")] = False
     rename: Annotated[bool, flag(
         """If `execute=True`, prepend ✓ to the duplicated work file name (or possibly to the original file name if treat_bigger_as_original).
-     Mutually exclusive with `replace_with_original` and `delete`.""")] = False
+     Mutually exclusive with other execute action.""")] = False
     delete: Annotated[bool, flag(
         """If `execute=True`, delete theduplicated work file name (or possibly to the original file name if treat_bigger_as_original).
-     Mutually exclusive with replace_with_original and rename.""")] = False
+     Mutually exclusive with other execute action.""")] = False
     replace_with_original: Annotated[bool, flag(
         """If `execute=True`, replace duplicated work file with the original (or possibly vice versa if treat_bigger_as_original).
-    Mutually exclusive with rename and delete.""")] = False
+    Mutually exclusive with other execute action.""")] = False
+    replace_with_symlink: Annotated[bool, flag(
+        """If `execute=True`, replace duplicated work file with the relative symlink to the original (or possibly vice versa if treat_bigger_as_original). Its modification time is kept.
+    Mutually exclusive with other execute action.""")] = False
     set_both_to_older_date: Annotated[bool, flag(
         "If `execute=True`, `media_magic=True` or (media_magic=False and `ignore_date=True`), both files are set to the older date. Ex: work file get's the original file's date or vice versa.")] = False
     treat_bigger_as_original: Annotated[bool, flag(
@@ -140,7 +143,7 @@ class Deduplidog:
     img_compare_date: Annotated[bool, flag(
         "If True and `media_magic=True`, the work file date or the work file EXIF date must match the original file date (has to be no more than an hour around).")] = False
     img_max_size: Annotated[int, opt(
-        "Used only when media_magic is True. In the beginning, we preload the image hash of all the img in the original folder. This makes the hash calculation preload to skip if the file is bigger than this bytes. If you are searching for a relatively small image duplicates, you boost the original image hash caching speed by skipping the large ones.", 1)] = 0
+        "Used only when media_magic is True. In the beginning, we preload the image hash of all the img in the original folder. This makes the hash calculation preload to skip if the file is bigger than this bytes. If you are searching for a relatively small image duplicates, you boost the original image hash caching speed by skipping the large ones.", 0)] = 0
 
     # Helper section
     log_level: Annotated[int, opt("10 debug .. 50 critical", logging.WARNING, 1)] = logging.WARNING
@@ -221,6 +224,9 @@ class Deduplidog:
 
         self._files_cache.clear()
         not_computed = 0
+        self.work_files = [f for f in tqdm(
+            (p for p in Path(self.work_dir).rglob("*") if not p.is_dir()), desc="Caching working files")]
+
         if not self.ignore_name:
             for p in self.file_list:
                 p_case = Path(str(p).casefold()) if self.casefold else p
@@ -229,8 +235,13 @@ class Deduplidog:
             # We preload the metadata cache, since we think there will be a lot of candidates.
             # This is because media_magic does not use date nor size file filtering so evaluating the first work_file might
             # take ages. Here, we put a nice progress bar.
-            not_computed = self.preload_metadata(self.file_list)
-        print("Number of originals:", len(self.file_list) - not_computed)
+            not_computed = self.preload_metadata(self.file_list, self.work_files)
+
+        orig_count = len(self.file_list) - not_computed
+        if not orig_count:
+            print("No originals to be compared.")
+            return
+        print("Number of originals:", orig_count)
 
         self._common_prefix_length = len(os.path.commonprefix([self.original_dir, self.work_dir])) \
             if self.shorter_log else 0
@@ -258,23 +269,25 @@ class Deduplidog:
                 if self.having_multiple_candidates:
                     print("Unsuccessful files having multiple candidates length:", len(self.having_multiple_candidates))
 
-    def preload_metadata(self, files: list[Path]) -> int:
+    def preload_metadata(self, files: list[Path], work_files: list[Path]) -> int:
         """ Populate self.metadata with performance-intensive file information.
 
         We return the number of images whose hash was not computed.
         """
+        if not any(x for x in work_files if x.suffix.lower() in IMAGE_SUFFIXES):
+            logger.info("Do not preload metadata as there is no image among work files to be compared to.")
+            return 0
+
         # Strangely, when I removed cached_properties from FileMetadata in order to be serializable for multiprocesing,
         # using ThreadPoolExecutor is just as quick as ProcessPoolExecutor
         # as it spans the threads over multiple cores too.
         # I thought ThreadPoolExecutor spans just on a single core.
         images = [x for x in files if x.suffix.lower() in IMAGE_SUFFIXES]
-        with ProcessPoolExecutor(max_workers=2) as executor:
+        with ProcessPoolExecutor(max_workers=4) as executor:
             for fm in tqdm(executor.map(partial(FileMetadata.preload, max_size=self.img_max_size), images),
                            total=len(images),
                            desc="Caching image hashes"):
                 self.metadata[fm.file] = fm
-                if not fm.average_hash:
-                    count = 1
         return sum(1 for fm in self.metadata.values() if not fm.average_hash)
 
     def check(self):
@@ -339,26 +352,27 @@ class Deduplidog:
         action = "will be" if self.execute else f"would be (if execute were True)"
         print(f"{which.capitalize()}{small}{nonzero} {action} ", end="")
 
-        match self.rename, self.replace_with_original, self.delete:
-            case False, False, False:
+        match self.rename, self.replace_with_original, self.delete, self.replace_with_symlink:
+            case False, False, False, False:
                 print("left intact (because no action is selected).")
-            case True, False, False:
+            case True, False, False, False:
                 print("renamed (prefixed with ✓).")
-            case False, True, False:
+            case False, True, False, False:
                 print("replaced with the original.")
-            case False, False, True:
+            case False, False, True, False:
                 print("deleted.")
+            case False, False,  False, True:
+                print("replaced with the symlink.")
             case _:
-                raise AssertionError("Choose either rename or replace_with_original")
+                raise AssertionError("Choose only one execute action (like only rename).")
 
         if self.set_both_to_older_date:
             print("Original file mtime date might be set backwards to the duplicate file.")
         print("")  # sometimes, this line is consumed
 
     def _loop_files(self):
-        work_dir, skip = self.work_dir, self.skip
-        self.work_files = work_files = [f for f in tqdm((p for p in Path(work_dir).rglob(
-            "*") if not p.is_dir()), desc="Caching working files")]
+        skip = self.skip
+        work_files = self.work_files
         if skip:
             if isinstance(work_files, list):
                 work_files = work_files[skip:]
@@ -500,6 +514,9 @@ class Deduplidog:
             if self.replace_with_original:
                 self._replace_with_original(change, affected_file, other_file)
 
+            if self.replace_with_symlink:
+                self._replace_with_symlink(change, affected_file, other_file)
+
         self.changes.append(change)
         if warning:
             self.warning_count += 1
@@ -563,6 +580,21 @@ class Deduplidog:
         change[affected_file].append(msg)
         self.metadata.pop(affected_file, None)
 
+    def _replace_with_symlink(self, change: Change, affected_file: Path, other_file: Path):
+        msg = "symlinkable"
+        old_time = self.metadata[affected_file].stat.st_mtime
+        if self.execute:
+            msg = "symlinking"
+            affected_file.unlink()
+            affected_file.symlink_to(os.path.relpath(other_file, os.path.dirname(affected_file)))
+            os.utime(affected_file, (old_time,)*2, follow_symlinks=False)
+        if self.inspect:
+            self._inspect_print(f"ln -sfr {_qp(other_file)} {_qp(affected_file)}"
+                                f" && touch -h -t {datetime.fromtimestamp(old_time).strftime('%Y%m%d%H%M.%S')} {_qp(affected_file)}")
+        change[affected_file].append(msg)
+        self.passed_away.add(affected_file)
+        self.metadata.pop(affected_file, None)
+
     def _change_file_date(self, path, old_date: float, new_date: float, change: Change):
         # Consider following usecase:
         # Duplicated file 1, date 14:06
@@ -594,9 +626,9 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.ignore_date
-                or wst.st_mtime == ost.st_mtime
-                or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
-                ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
+                        or wst.st_mtime == ost.st_mtime
+                        or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
+                    ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 
     def _find_similar_media(self,  work_file: Path, comparing_image: bool, candidates: list[Path]):
