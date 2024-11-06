@@ -342,8 +342,8 @@ class Deduplidog:
                 self.checksum and ("crc32", "") or ("", "crc32")))
             print(f"Find files by {used}{f', ignoring: {ignored}' if ignored else ''}")
 
-        dirs_ = "" if self.same_superdir else f" at '{
-            self.work_dir_name}' or the original dir at '{self.original_dir_name}'"
+        dirs_ = "" if self.same_superdir else \
+            f" at '{self.work_dir_name}' or the original dir at '{self.original_dir_name}'"
         which = f"either the file from the work dir{dirs_} (whichever is bigger)" \
             if self.treat_bigger_as_original \
             else f"duplicates from the work dir at '{self.work_dir_name}'"
@@ -575,8 +575,8 @@ class Deduplidog:
                 affected_file.unlink()
             if self.inspect:
                 # TODO check
-                self._inspect_print(f"cp --preserve {_qp(other_file)
-                                                     } {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
+                self._inspect_print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)}"
+                                    f" && rm {_qp(affected_file)}")
         change[affected_file].append(msg)
         self.metadata.pop(affected_file, None)
 
@@ -626,9 +626,9 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.ignore_date
-                        or wst.st_mtime == ost.st_mtime
-                        or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
-                    ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
+                    or wst.st_mtime == ost.st_mtime
+                    or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
+                ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 
     def _find_similar_media(self,  work_file: Path, comparing_image: bool, candidates: list[Path]):
