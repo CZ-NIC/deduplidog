@@ -59,6 +59,7 @@ def main():
             if input("See more options? [Y/n] ").casefold() not in ("y", ""):
                 break
     except KeyboardInterrupt:
+        print("")
         sys.exit()
 
 

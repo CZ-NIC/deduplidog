@@ -1,18 +1,18 @@
-from contextlib import redirect_stdout
 import logging
 import os
 import re
 import shutil
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass
+from contextlib import redirect_stdout
+from dataclasses import dataclass, field
 from datetime import datetime
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from time import sleep
 from typing import Annotated, get_args, get_type_hints
 
-import click
+import click  # TODO use rather tyro
 from dataclass_click import option
 from humanize import naturaldelta, naturalsize
 from PIL import Image
@@ -22,8 +22,8 @@ from tqdm.autonotebook import tqdm
 from .helpers import Field, FileMetadata, keydefaultdict
 from .utils import _qp, crc, get_frame_count, open_log_file
 
-VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv", ".hevc"
-IMAGE_SUFFIXES = ".jpg", ".jpeg", ".png", ".gif", ".avif", ".webp", ".heic", ".avif"
+VIDEO_SUFFIXES = ".mp4", ".mov", ".avi", ".vob", "ogv", "webm", ".mts", ".3gp", ".mpg", ".mpeg", ".wmv", ".hevc"
+IMAGE_SUFFIXES = ".jpg", ".jpeg", ".jxl", ".png", ".gif", ".avif", ".webp", ".heic"
 MEDIA_SUFFIXES = IMAGE_SUFFIXES + VIDEO_SUFFIXES
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,8 @@ class Deduplidog:
         "Used only when media_magic is True", 1)] = 1
     img_compare_date: Annotated[bool, flag(
         "If True and `media_magic=True`, the work file date or the work file EXIF date must match the original file date (has to be no more than an hour around).")] = False
+    img_max_size: Annotated[int, opt(
+        "Used only when media_magic is True. In the beginning, we preload the image hash of all the img in the original folder. This makes the hash calculation preload to skip if the file is bigger than this bytes. If you are searching for a relatively small image duplicates, you boost the original image hash caching speed by skipping the large ones.", 1)] = 0
 
     # Helper section
     log_level: Annotated[int, opt("10 debug .. 50 critical", logging.WARNING, 1)] = logging.WARNING
@@ -151,6 +153,8 @@ class Deduplidog:
 
     file_list: list[Path] = None
     "Use original file list. If none, a new is generated or a cached version is used."
+    work_files: list[Path] = field(default_factory=list)
+    "All files in work dir."
     suffixes: bool | tuple[str] = False
     "If set, only files with such suffixes are compared. Ex: `suffixes = MEDIA_SUFFIXES`"
 
@@ -165,7 +169,7 @@ class Deduplidog:
     ending_counter = re.compile(r"\(\d+\)$")
 
     def __repr__(self):
-        text = ', '.join(f'{attr}={len(v)  if isinstance(v, (set, list, dict)) else v}' for attr,
+        text = ', '.join(f'{attr}={len(v) if isinstance(v, (set, list, dict)) else v}' for attr,
                          v in vars(self).items())
         return f'Deduplidog({text})'
 
@@ -214,9 +218,9 @@ class Deduplidog:
                 return
         else:
             self.file_list = Deduplidog.build_originals(self.original_dir, self.suffixes)
-        print("Number of originals:", len(self.file_list))
 
         self._files_cache.clear()
+        not_computed = 0
         if not self.ignore_name:
             for p in self.file_list:
                 p_case = Path(str(p).casefold()) if self.casefold else p
@@ -225,7 +229,8 @@ class Deduplidog:
             # We preload the metadata cache, since we think there will be a lot of candidates.
             # This is because media_magic does not use date nor size file filtering so evaluating the first work_file might
             # take ages. Here, we put a nice progress bar.
-            self.preload_metadata(self.file_list)
+            not_computed = self.preload_metadata(self.file_list)
+        print("Number of originals:", len(self.file_list) - not_computed)
 
         self._common_prefix_length = len(os.path.commonprefix([self.original_dir, self.work_dir])) \
             if self.shorter_log else 0
@@ -242,8 +247,9 @@ class Deduplidog:
             if self._output:
                 self._output.close()
             if self.bar:
+                print()
                 print(f"{'Affected' if self.execute else 'Affectable'}:"
-                      f" {self.affected_count}/{len(self.file_list)- self.ignored_count}", end="")
+                      f" {self.affected_count}/{len(self.work_files) - self.ignored_count}", end="")
                 if self.ignored_count:
                     print(f" ({self.ignored_count} ignored)", end="")
                 print("\nAffected size:", naturalsize(self.size_affected))
@@ -252,17 +258,24 @@ class Deduplidog:
                 if self.having_multiple_candidates:
                     print("Unsuccessful files having multiple candidates length:", len(self.having_multiple_candidates))
 
-    def preload_metadata(self, files: list[Path]):
-        """ Populate self.metadata with performance-intensive file information """
+    def preload_metadata(self, files: list[Path]) -> int:
+        """ Populate self.metadata with performance-intensive file information.
+
+        We return the number of images whose hash was not computed.
+        """
         # Strangely, when I removed cached_properties from FileMetadata in order to be serializable for multiprocesing,
         # using ThreadPoolExecutor is just as quick as ProcessPoolExecutor
         # as it spans the threads over multiple cores too.
         # I thought ThreadPoolExecutor spans just on a single core.
         images = [x for x in files if x.suffix.lower() in IMAGE_SUFFIXES]
         with ProcessPoolExecutor(max_workers=2) as executor:
-            for file, *args in tqdm(executor.map(FileMetadata.preload, images),
-                                    total=len(images), desc="Caching image hashes"):
-                self.metadata[file] = FileMetadata(file, *args)
+            for fm in tqdm(executor.map(partial(FileMetadata.preload, max_size=self.img_max_size), images),
+                           total=len(images),
+                           desc="Caching image hashes"):
+                self.metadata[fm.file] = fm
+                if not fm.average_hash:
+                    count = 1
+        return sum(1 for fm in self.metadata.values() if not fm.average_hash)
 
     def check(self):
         """ Checks setup and prints out the description. """
@@ -316,7 +329,8 @@ class Deduplidog:
                 self.checksum and ("crc32", "") or ("", "crc32")))
             print(f"Find files by {used}{f', ignoring: {ignored}' if ignored else ''}")
 
-        dirs_ = "" if self.same_superdir else f" at '{self.work_dir_name}' or the original dir at '{self.original_dir_name}'"
+        dirs_ = "" if self.same_superdir else f" at '{
+            self.work_dir_name}' or the original dir at '{self.original_dir_name}'"
         which = f"either the file from the work dir{dirs_} (whichever is bigger)" \
             if self.treat_bigger_as_original \
             else f"duplicates from the work dir at '{self.work_dir_name}'"
@@ -343,7 +357,7 @@ class Deduplidog:
 
     def _loop_files(self):
         work_dir, skip = self.work_dir, self.skip
-        work_files = [f for f in tqdm((p for p in Path(work_dir).rglob(
+        self.work_files = work_files = [f for f in tqdm((p for p in Path(work_dir).rglob(
             "*") if not p.is_dir()), desc="Caching working files")]
         if skip:
             if isinstance(work_files, list):
@@ -544,11 +558,12 @@ class Deduplidog:
                 affected_file.unlink()
             if self.inspect:
                 # TODO check
-                self._inspect_print(f"cp --preserve {_qp(other_file)} {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
+                self._inspect_print(f"cp --preserve {_qp(other_file)
+                                                     } {_qp(affected_file.parent)} && rm {_qp(affected_file)}")
         change[affected_file].append(msg)
         self.metadata.pop(affected_file, None)
 
-    def _change_file_date(self, path, old_date, new_date, change: Change):
+    def _change_file_date(self, path, old_date: float, new_date: float, change: Change):
         # Consider following usecase:
         # Duplicated file 1, date 14:06
         # Duplicated file 2, date 15:06
@@ -562,7 +577,8 @@ class Deduplidog:
             os.utime(path, (new_date,)*2)  # change access time, modification time
             self.metadata.pop(path, None)
         if self.inspect:
-            self._inspect_print(f"touch -t {new_date} {_qp(path)}")  # TODO check
+            self._inspect_print(
+                f"touch -t {datetime.fromtimestamp(new_date).strftime('%Y%m%d%H%M.%S')} {_qp(path)}")  # TODO check
 
     def _path(self, path):
         """ Strips out common prefix that has originals with work_dir for display reasons.
@@ -578,9 +594,9 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.ignore_date
-                    or wst.st_mtime == ost.st_mtime
-                    or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
-                    ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
+                or wst.st_mtime == ost.st_mtime
+                or self.tolerate_hour and self.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.tolerate_hour[1]
+                ) and (self.ignore_size or wst.st_size == ost.st_size and (not self.checksum or crc(original) == crc(work_file))):
                 return original
 
     def _find_similar_media(self,  work_file: Path, comparing_image: bool, candidates: list[Path]):
@@ -620,9 +636,13 @@ class Deduplidog:
             if similar or not self.img_compare_date:
                 hash0 = orig_cache.average_hash
                 hash1 = work_cache.average_hash
-                # maximum bits that could be different between the hashes
-                hash_dist = abs(hash0 - hash1)
-                similar = hash_dist <= self.accepted_img_hash_diff
+                if not hash0 or not hash1:
+                    similar = False
+                    hash_dist = "failed"
+                else:
+                    # maximum bits that could be different between the hashes
+                    hash_dist = abs(hash0 - hash1)
+                    similar = hash_dist <= self.accepted_img_hash_diff
                 if not similar and self.debug:
                     print("Hash distance:", hash_dist)
             return similar
@@ -659,7 +679,7 @@ class Deduplidog:
                 wn, on = str(wf.parent)[len_:] or "(basedir)", str(of.parent)[len_:] or "(basedir)"
             else:  # the file name will make the meaningful difference
                 wn, on = wf.name, of.name
-
+        print()
         print("*", wf)
         print(" ", of)
         [print(text, *(str(s) for s in changes))

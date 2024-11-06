@@ -22,7 +22,7 @@ ipywidgets = "*"
 opencv-python = "*"
 Pillow = "*"
 pillow-heif = "*"
-textual = "~=0.52.1"
+textual = "~=0.52"  # TODO check bigger version; or rather migrate to mininterface
 sh = "*"
 tqdm = "*"
 

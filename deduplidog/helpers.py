@@ -6,7 +6,7 @@ from functools import cache
 from os import stat_result
 from pathlib import Path
 from types import UnionType
-from typing import Any, get_args
+from typing import Any, Literal, Self, get_args
 
 from PIL import ExifTags, Image
 from imagehash import ImageHash, average_hash
@@ -62,11 +62,13 @@ class keydefaultdict(defaultdict):
 class FileMetadata:
     file: Path
     _exif_times: set | tuple | None = None
-    _average_hash: ImageHash | None = None
+    _average_hash: ImageHash | None | Literal[False] = None
     _stat: stat_result | None = None
     _pil = None
     cleaned_count = 0
     "Not used, just for debugging: To determine whether the clean up is needed or not."
+    max_size: int = 0
+    """ If file is bigger than this bytes, do not count hash. """
 
     @property
     def exif_times(self):
@@ -82,7 +84,13 @@ class FileMetadata:
     @property
     def average_hash(self):
         if not self._average_hash:
-            self._average_hash = average_hash(self.get_pil())
+            if self.max_size and self.stat.st_size > self.max_size:
+                self._average_hash = False
+            else:
+                try:
+                    self._average_hash = average_hash(self.get_pil())
+                except OSError:  # computing failed, put a hash that means no img is comparable
+                    self._average_hash = False
         return self._average_hash
 
     @property
@@ -97,12 +105,12 @@ class FileMetadata:
         return self._pil
 
     @classmethod
-    def preload(cls, file):
+    def preload(cls, file, max_size=None) -> Self | None:
         """ Preload all values. """
-        o = cls(file)
-        r = file, o.exif_times, o.average_hash, o.stat
+        o = cls(file, max_size=max_size)
+        o.exif_times, o.average_hash, o.stat
         o.clean()  # PIL will never be needed anymore
-        return r
+        return o
 
     def clean(self):
         """ As PIL is the most memory consuming, we allow the easy clean up. """
