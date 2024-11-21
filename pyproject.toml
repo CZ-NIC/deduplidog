@@ -12,8 +12,7 @@ homepage = "https://github.com/CZ-NIC/deduplidog"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-click = "~=8.1.7"
-dataclass_click = "~=1.0.2"
+mininterface = "*"
 python = ">=3.11"
 humanize = "*"
 imagehash = "*"
@@ -22,7 +21,6 @@ ipywidgets = "*"
 opencv-python = "*"
 Pillow = "*"
 pillow-heif = "*"
-textual = "~=0.52"          # TODO check bigger version; or rather migrate to mininterface
 sh = "*"
 tqdm = "*"
 

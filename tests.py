@@ -1,4 +1,5 @@
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import chain
 import os
@@ -10,6 +11,7 @@ import random
 import string
 
 from deduplidog import Deduplidog
+from deduplidog.deduplidog import Action, Execution, Match, Media, Helper
 
 
 @dataclass
@@ -49,7 +51,7 @@ class FileRepresentation:
 
 
 @dataclass
-class FolderState:
+class FolderState(Mapping):
     test_case: TestCase
     _work_dir: Path
     _original_dir: Path
@@ -57,8 +59,18 @@ class FolderState:
     originals: dict[str, FileRepresentation]
 
     def __iter__(self):
-        # yield from (*self.work_files.values(), *self.originals.values())
-        yield from (self._work_dir, self._original_dir)
+        yield from ('work_dir', 'original_dir')
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, key):
+        if key == 'work_dir':
+            return self._work_dir
+        elif key == 'original_dir':
+            return self._original_dir
+        else:
+            raise KeyError(key)
 
     def check(self, prefixed: tuple[int] = None, suck: tuple[int] = None):
         """Checks the file changes
@@ -71,11 +83,24 @@ class FolderState:
         [f.check(self.test_case) for f in chain(self.work_files.values(), self.originals.values())]
 
 
+def drun(action=None, execution=None, match=None, media=None, helper=None, **kw):
+    def _(l: list | dict):
+        if isinstance(l, list):
+            return {k: True for k in l}
+        return l
+    return Deduplidog(Action(**_(action or [])),
+                      Execution(**_(execution or [])),
+                      Match(**_(match or [])),
+                      Media(**_(media or [])),
+                      Helper(**_(helper or [])),
+                      **kw).start()
+
+
 class TestDeduplidog(TestCase):
 
     def prepare(self, testing_dir: str = None):
-        self.temp = mkdtemp()  # TemporaryDirectory() TODO
-        # temp = Path(testing_dir) if testing_dir else self.temp.name TODO
+        self.temp = mkdtemp()  # TemporaryDirectory() NOTE
+        # temp = Path(testing_dir) if testing_dir else self.temp.name NOTE
         temp = str(self.temp)
         originals = Path(temp, "originals")
         work_dir = Path(temp, "work_dir")
@@ -102,50 +127,50 @@ class TestDeduplidog(TestCase):
 
     def test_simple_prefix(self):
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True)
+        drun(["rename", "execute"], **state)
         state.check(prefixed=(11,))
 
     def test_date(self):
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, ignore_date=True, neglect_warning=True)
+        drun(["rename", "execute"], ["neglect_warning"], ["ignore_date"], **state)
         state.check(prefixed=(4, 5, 6, 7, 8, 9, 10, 11))
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, ignore_date=True)
+        drun(["rename", "execute"], match=["ignore_date"], **state)
         state.check(prefixed=(4, 5, 6, 7, 11))
 
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, tolerate_hour=1, neglect_warning=True)
+        drun(["rename", "execute"], ["neglect_warning"], {"tolerate_hour": 1}, **state)
         state.check(prefixed=(4, 7, 8, 9, 11))
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, tolerate_hour=1)
+        drun(["rename", "execute"], match={"tolerate_hour": 1}, **state)
         state.check(prefixed=(4, 7, 11))
 
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2, neglect_warning=True)
+        drun(["rename", "execute"], ["neglect_warning"], {"tolerate_hour": 2},  **state)
         state.check(prefixed=(4, 5, 6, 7, 8, 9, 11))
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2)
+        drun(["rename", "execute"], match={"tolerate_hour": 2}, **state)
         state.check(prefixed=(4, 5, 6, 7, 11))
 
     def test_replace_with_original(self):
         state = self.prepare()
-        Deduplidog(*state, replace_with_original=True, execute=True, neglect_warning=True)
+        drun(["replace_with_original", "execute"], ["neglect_warning"], **state)
         state.work_files["file_11"].suck(state.originals["file_11"])
         state.check()
 
         state = self.prepare()
-        Deduplidog(*state, replace_with_original=True, execute=True, tolerate_hour=2, neglect_warning=True)
+        drun(["replace_with_original", "execute"], ["neglect_warning"], {"tolerate_hour": 2}, **state)
         state.check(suck=(4, 5, 6, 7, 8, 9, 11))
 
     def test_invert_selection(self):
         state = self.prepare()
-        self.assertRaises(AssertionError, Deduplidog,
-                          *state, replace_with_original=True, execute=True, tolerate_hour=2,  invert_selection=True)
-        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2,  neglect_warning=True, invert_selection=False)
+        with self.assertRaises(AssertionError):
+            drun(["replace_with_original", "execute"], match={"tolerate_hour": 2, "invert_selection": True}, **state)
+        drun(["rename", "execute"], ["neglect_warning"], {"tolerate_hour": 2, "invert_selection": False}, **state)
         state.check(prefixed=(4, 5, 6, 7, 8, 9, 11))
 
         state = self.prepare()
-        Deduplidog(*state, rename=True, execute=True, tolerate_hour=2,  neglect_warning=True, invert_selection=True)
+        drun(["rename", "execute"], ["neglect_warning"], {"tolerate_hour": 2, "invert_selection": True}, **state)
         state.check(prefixed=(1, 2, 10))
 
     #  No media file in the test case.
