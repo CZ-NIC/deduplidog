@@ -10,10 +10,13 @@ from datetime import datetime
 from functools import cache, partial
 from pathlib import Path
 from time import sleep
+import traceback
 from typing import Optional
 
 from humanize import naturaldelta, naturalsize
 from PIL import Image
+from mininterface import Mininterface
+from mininterface.facet import Image as FacetImage
 from pillow_heif import register_heif_opener
 from tqdm.autonotebook import tqdm
 from tyro.conf import OmitArgPrefixes
@@ -76,6 +79,9 @@ class Execution:
     neglect_warning: bool = False
     "By default, when a file with bigger size or older date should be affected, just warning is generated. Turn this to suppress it."
 
+    confirm_one_by_one: bool = True
+    """ Instead of executing changes all at once, confirm one by one. So that you may decide whether the media similarity detection works. """
+
 
 @dataclass
 class Match:
@@ -119,17 +125,18 @@ class Match:
 class Media:
 
     media_magic: bool = False
-    """Nor the size or date is compared for files with media suffixes.
+    """ Media files similarity detection.
+    Nor the size or date is compared for files with media suffixes.
     A video is considered a duplicate if it has the same name and a similar number of frames, even if it has a different extension.
     An image is considered a duplicate if it has the same name and a similar image hash, even if the files are of different sizes.
     (This mode is considerably slower.)
     """
 
     accepted_frame_delta: int = 1
-    "Used only when media_magic is True"
+    "Number of frames for which two videos are considered equal."
 
     accepted_img_hash_diff: int = 1
-    "Used only when media_magic is True"
+    "Hash difference between images so that they are considered equal, see https://github.com/JohannesBuchner/imagehash"
 
     img_compare_date: bool = False
     "If True and `media_magic=True`, the work file date or the work file EXIF date must match the original file date (has to be no more than an hour around)."
@@ -233,6 +240,8 @@ class Deduplidog:
         self.having_multiple_candidates: dict[Path, list[Path]] = {}
         "What unsuccessful candidates did work files have?"
 
+        self.m = Mininterface()
+
     def reset(self):
         self.size_affected = 0
         self.affected_count = 0
@@ -240,7 +249,9 @@ class Deduplidog:
         self.ignored_count = 0
         self.having_multiple_candidates.clear()
 
-    def start(self):
+    def start(self, interface=None):
+        if interface:
+            self.m = interface
         self.reset()
         self.check()
         self.perform()
@@ -295,7 +306,7 @@ class Deduplidog:
                       f" {self.affected_count}/{len(self.work_files) - self.ignored_count}", end="")
                 if self.ignored_count:
                     print(f" ({self.ignored_count} ignored)", end="")
-                print("\nAffected size:", naturalsize(self.size_affected))
+                print(f"\n{'Affected' if self.action.execute else 'Affectable'} size:", naturalsize(self.size_affected))
                 if self.warning_count:
                     print(f"Warnings: {self.warning_count}")
                 if self.having_multiple_candidates:
@@ -386,23 +397,26 @@ class Deduplidog:
         action = "will be" if self.action.execute else f"would be (if execute were True)"
         print(f"{which.capitalize()}{small}{nonzero} {action} ", end="")
 
-        match self.action.rename, self.action.replace_with_original, self.action.delete, self.action.replace_with_symlink:
-            case False, False, False, False:
-                print("left intact (because no action is selected).")
-            case True, False, False, False:
-                print("renamed (prefixed with ✓).")
-            case False, True, False, False:
-                print("replaced with the original.")
-            case False, False, True, False:
-                print("deleted.")
-            case False, False,  False, True:
-                print("replaced with the symlink.")
-            case _:
-                raise AssertionError("Choose only one execute action (like only rename).")
+        print(self._get_action(passive=True) + ".")
 
         if self.execution.set_both_to_older_date:
             print("Original file mtime date might be set backwards to the duplicate file.")
         print("")  # sometimes, this line is consumed
+
+    def _get_action(self, passive=False):
+        action = self.action.rename, self.action.replace_with_original, self.action.delete, self.action.replace_with_symlink
+        if not sum(action):
+            return f"{'left' if passive else 'leave'} intact (because no action is selected)"
+        elif sum(action) > 1:
+            raise AssertionError("Choose only one execute action (like only rename).")
+        elif self.action.rename:
+            return f"rename{'d' * passive} (prefixed with ✓)"
+        elif self.action.replace_with_original:
+            return f"replace{'d' * passive} with the original"
+        elif self.action.delete:
+            return f"delete{'d' * passive}"
+        elif self.action.replace_with_symlink:
+            return f"replace{'d' * passive} with the symlink"
 
     def _loop_files(self):
         skip = self.skip
@@ -425,7 +439,8 @@ class Deduplidog:
                         raise
                     else:
                         sleep(1 * attempt)
-                        print("Repeating on exception", work_file, e)
+                        tb = traceback.format_tb(e.__traceback__)
+                        print("Repeating on exception", work_file, e, tb[-1])
                         continue
                 except KeyboardInterrupt:
                     print(f"Interrupted. You may proceed where you left with the skip={skip+bar.n} parameter.")
@@ -532,6 +547,9 @@ class Deduplidog:
                 change[other_file].append(f"DATE WARNING + {naturaldelta(other_date-affected_date)}")
                 warning = other_file
 
+        if self.execution.confirm_one_by_one and not self._confirm(affected_file, other_file, change):
+            # NOTE we can resolve the warning in the dialog too
+            return
         if warning and not self.execution.neglect_warning:
             change[warning].append("🛟skipped on warning")
         else:
@@ -560,6 +578,25 @@ class Deduplidog:
         if self._output:
             with redirect_stdout(self._output):
                 self._print_change(change)
+
+    def _confirm(self, affected_file, other_file, change: Change):
+        els = []
+        is_yes = True
+
+        def add_file_elements(title, file):
+            nonlocal is_yes
+            els.extend([title, file])
+            if file.suffix.lower() in IMAGE_SUFFIXES:
+                els.append(FacetImage(file))
+            if t := change[file]:
+                els.extend(t)
+                is_yes = False
+
+        add_file_elements("Going to affect", affected_file)
+        add_file_elements("Original", other_file)
+
+        self.m.facet._layout(els)
+        return getattr(self.m, "is_yes" if is_yes else "is_no")(self._get_action().capitalize())
 
     def _rename(self, change: Change, affected_file: Path):
         msg = "renamable"
@@ -662,7 +699,7 @@ class Deduplidog:
             if (self.match.ignore_date
                     or wst.st_mtime == ost.st_mtime
                     or self.match.tolerate_hour and self.match.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.match.tolerate_hour[1]
-                    ) and (self.match.ignore_size or wst.st_size == ost.st_size and (not self.match.checksum or crc(original) == crc(work_file))):
+                ) and (self.match.ignore_size or wst.st_size == ost.st_size and (not self.match.checksum or crc(original) == crc(work_file))):
                 return original
 
     def _find_similar_media(self,  work_file: Path, comparing_image: bool, candidates: list[Path]):
