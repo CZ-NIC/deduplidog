@@ -1,0 +1,47 @@
+site_name: "Deduplidog"
+repo_name: CZ-NIC/deduplidog
+repo_url: https://github.com/CZ-NIC/deduplidog
+docs_dir: docs
+
+theme:
+  name: "material"
+  features: navigation.expand
+
+plugins:
+  - search
+  - mermaid2
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            docstring_section_style: table
+            show_source: false
+            members_order: source
+            show_bases: false
+            show_labels: false
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      use_pygments: true # highlight code during build time, not in javascript
+      linenums: false # enable line numbering
+      linenums_style: pymdownx-inline # how lines are numbered
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences: # make exceptions to highlighting of code:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid_custom
+  - pymdownx.keys # keyboard keys
+  - tables
+  - footnotes
+
+nav:
+  - Introduction: index.md
+  - Overview.md
+  - Utils.md
+  - Changelog.md

@@ -37,6 +37,8 @@ register_heif_opener()
 
 @dataclass
 class Action:
+    """ What is to be done with the duplicates. """
+
     execute: bool = False
     "If False, nothing happens, just a safe run is performed."
 
@@ -63,6 +65,8 @@ class Action:
 
 @dataclass
 class Execution:
+    """ Parameters affecting the way the execution runs. """
+
     set_both_to_older_date: bool = False
     "If `execute=True`, `media_magic=True` or (media_magic=False and `ignore_date=True`), both files are set to the older date. Ex: work file get's the original file's date or vice versa."
 
@@ -80,11 +84,15 @@ class Execution:
     "By default, when a file with bigger size or older date should be affected, just warning is generated. Turn this to suppress it."
 
     confirm_one_by_one: bool = True
-    """ Instead of executing changes all at once, confirm one by one. So that you may decide whether the media similarity detection works. """
+    """ Instead of executing changes all at once, confirm one by one.
+        So that you may decide whether the media similarity detection works.
+        If a warning occurs, the default is 'no' to perform the action. """
 
 
 @dataclass
 class Match:
+    """ The way the files are compared. """
+
     casefold: bool = False
     "Case insensitive file name comparing."
     checksum: bool = False
@@ -123,6 +131,7 @@ class Match:
 
 @dataclass
 class Media:
+    """ Media files similarity detection. """
 
     media_magic: bool = False
     """ Media files similarity detection.
@@ -146,6 +155,8 @@ class Media:
 
 @dataclass
 class Helper:
+    """ Helper settings. """
+
     log_level: int = logging.WARNING
     "10 debug .. 50 critical"  # NOTE check
 

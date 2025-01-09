@@ -6,8 +6,6 @@ from .deduplidog import Deduplidog
 
 
 def main():
-    # NOTE: I'd like to have the default in case work dir is not specified args=("--work-dir", str(Path.cwd()))
-    # Currently, args overthrows CLI arguments.
     with run(Deduplidog, interface=None) as m:
         try:
             while True:
@@ -32,9 +30,9 @@ def main():
         except KeyboardInterrupt:
             print("")
             sys.exit()
-        except Exception as e:
-            import ipdb
-            ipdb.post_mortem()  # TODO
+        # except Exception as e:
+        #     import ipdb
+        #     ipdb.post_mortem()
 
 
 if __name__ == "__main__":
