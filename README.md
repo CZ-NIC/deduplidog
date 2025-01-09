@@ -1,6 +1,10 @@
+<p align="center"><b>Deduplidog</b> – Deduplicator that covers your back.</p>
+<p align="center">
+  <img src="./asset/logo.jpg" />
+</p>
+
 [![Build Status](https://github.com/CZ-NIC/deduplidog/actions/workflows/run-unittest.yml/badge.svg)](https://github.com/CZ-NIC/deduplidog/actions)
 
-Yet another file deduplicator.
 
 - [About](#about)
    * [What are the use cases?](#what-are-the-use-cases)
@@ -18,9 +22,9 @@ Yet another file deduplicator.
 # About
 
 ## What are the use cases?
-* I have downloaded photos and videos from the cloud. Oh, both Google Photos and Youtube shrink the file and changes the format. Moreover, it have shortened the file name to 47 characters and capitalize the extension. So how should I know that I have them all backed up offline?
+* I have downloaded photos and videos from the cloud. Oh, both Google Photos and Youtube *shrink the files* and change their format. Moreover, they shorten the file names to 47 characters and capitalize the extensions. So how am I supposed to know if I have everything backed up offline when the copies are resized?
 * My disk is cluttered with several backups and I'd like to be sure these are all just copies.
-* I merge data from multiple sources. Some files in the backup might have the former orignal file modification date that I might wish to restore.
+* I merge data from multiple sources. Some files in the backup might have *the former orignal file modification date* that I might wish to restore.
 
 ## What is compared?
 
@@ -53,19 +57,30 @@ The program does not write anything to the disk, unless `execute=True` is set. F
 
 Install with `pip install deduplidog`.
 
-It works as a standalone program with both CLI and TUI interfaces. Just launch the `deduplidog` command.
-Moreover, it works best when imported from a [Jupyter Notebook](https://jupyter.org/).
+It works as a standalone program with all the CLI, TUI and GUI interfaces. Just launch the `deduplidog` command.
 
 # Examples
+
+## Media magic confirmation
+
+Let's compare two folders.
+
+```bash
+deduplidog --work-dir folder1 --original-dir folder2  --media-magic --rename --execute
+```
+
+By default, `--confirm-one-by-one` is True, causing every change to be manually confirmed before it takes effect. So even though `--execute` is there, no change happen without confirmation. The change that happen is the `--rename`, the file in the `--work-dir` will be prefixed with the `✓` character. The `--media-magic` mode considers an image a duplicate if it has the same name and a similar image hash, even if the files are of different sizes.
+
+![Confirmation](asset/warnings_confirmation_example.avif "Confirmation, including warnings")
+
+Note that the default button is 'No' as there are some warnings. First, the file in the folder we search for duplicates in is bigger than the one in the original folder. Second, it is also older, suggesting that it might be the actual original.
+
 
 ## Duplicated files
 Let's take a closer look to a use-case.
 
-```python3
-import logging
-from deduplidog import Deduplidog
-
-Deduplidog("/home/user/duplicates", "/media/disk/origs", ignore_date=True, rename=True)
+```bash
+deduplidog --work-dir /home/user/duplicates --original-dir /media/disk/origs" --ignore-date --rename
 ```
 
 This command produced the following output:
@@ -85,9 +100,8 @@ Warnings: 1
 
 We found out all the files in the *duplicates* folder seem to be useless but one. It's date is earlier than the original one. The life buoy icon would prevent any action. To suppress this, let's turn on `set_both_to_older_date`. See with full log.
 
-```python3
-Deduplidog("/home/user/duplicates", "/media/disk/origs",
-   ignore_date=True, rename=True, set_both_to_older_date=True, log_level=logging.INFO)
+```bash
+deduplidog --work-dir /home/user/duplicates --original-dir /media/disk/origs --ignore-date --rename --set-both-to-older-date --log-level=10
 ```
 
 ```
@@ -112,9 +126,8 @@ Affected size: 59.9 kB
 
 You see, the log is at the most brief, yet transparent form. The files to be affected at the work folder are prepended with the 🔨 icon whereas those affected at the original folder uses 📄 icon. We might add `execute=True` parameter to perform the actions. Or use `inspect=True` to inspect.
 
-```python3
-Deduplidog("/home/user/duplicates", "/media/disk/origs",
-  ignore_date=True, rename=True, set_both_to_older_date=True, inspect=True)
+```bash
+deduplidog --work-dir /home/user/duplicates --original-dir /media/disk/origs --ignore-date --rename --set-both-to-older-date --inspect
 ```
 
 The `inspect=True` just produces the commands we might subsequently use.
@@ -133,7 +146,7 @@ You face a directory that might contain some images twice. Let's analyze. We tur
 ```
 $ deduplidog --work-dir ~/shuffled/ --media-magic --ignore-name --skip-bigger --log-level=20
 Only files with media suffixes are taken into consideration. Nor the size nor the date is compared. Nor the name!
-Duplicates from the work dir at 'shuffled' (only if smaller than the pair file) would be (if execute were True) left intact (because no action is selected).
+Duplicates from the work dir at 'shuffled' (only if smaller than the pair file) would be (if execute were True) left intact (because no action is selected, nothing will happen).
 
 Number of originals: 9
 Caching image hashes: 100%|███████████████████████████████████████████████████████████████████████████████████████████████| 9/9 [00:00<00:00, 16.63it/s]
@@ -197,7 +210,15 @@ Find the duplicates. Normally, the file must have the same size, date and name. 
 | output | bool | False | Stores the output log to a file in the current working directory. (Never overwrites an older file.) |
 
 ## Utils
-In the `deduplidog.utils` packages, you'll find a several handsome tools to help you. You will find parameters by using you IDE hints.
+
+The library might be invoked from a [Jupyter Notebook](https://jupyter.org/).
+
+```python3
+from deduplidog import Deduplidog
+Deduplidog("/home/user/duplicates", "/media/disk/origs", ignore_date=True, rename=True).start()
+```
+
+In the `deduplidog.utils` packages, you'll find a several handsome tools to help you. You will find parameters by using your IDE hints.
 
 ### `images`
 *`urls: Iterable[str | Path]`* Display a ribbon of images.

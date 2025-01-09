@@ -1,16 +1,14 @@
 import sys
 
-from mininterface import run
+from mininterface import Cancelled, run
 
 from .deduplidog import Deduplidog
 
 
 def main():
+    # NOTE: I'd like to have the default in case work dir is not specified args=("--work-dir", str(Path.cwd()))
+    # Currently, args overthrows CLI arguments.
     with run(Deduplidog, interface=None) as m:
-        # with run(Deduplidog, interface="tui") as m:
-        # m = run(Deduplidog, interface="gui")
-        # if 1:
-        # m.facet._layout  # TODO
         try:
             while True:
                 print("")
@@ -23,6 +21,8 @@ def main():
                     #     deduplidog.perform()
                     # else:
                     m.env.start(m)
+                except Cancelled:
+                    continue
                 except Exception as e:
                     print("-"*100)
                     print(e)

@@ -171,7 +171,7 @@ class Deduplidog:
     media: OmitArgPrefixes[Media]
     helper: OmitArgPrefixes[Helper]
 
-    work_dir: Path
+    work_dir: Path = Path.cwd()
     """Folder of the files suspectible to be duplicates."""
 
     original_dir: Path | None = None
@@ -255,6 +255,7 @@ class Deduplidog:
         self.reset()
         self.check()
         self.perform()
+        return self
 
     def perform(self):
         # build file list of the originals
@@ -406,7 +407,7 @@ class Deduplidog:
     def _get_action(self, passive=False):
         action = self.action.rename, self.action.replace_with_original, self.action.delete, self.action.replace_with_symlink
         if not sum(action):
-            return f"{'left' if passive else 'leave'} intact (because no action is selected)"
+            return f"{'left' if passive else 'leave'} intact (because no action is selected, nothing will happen)"
         elif sum(action) > 1:
             raise AssertionError("Choose only one execute action (like only rename).")
         elif self.action.rename:
@@ -697,9 +698,9 @@ class Deduplidog:
         for original in candidates:
             ost, wst = original.stat(), work_file.stat()
             if (self.match.ignore_date
-                    or wst.st_mtime == ost.st_mtime
-                    or self.match.tolerate_hour and self.match.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.match.tolerate_hour[1]
-                ) and (self.match.ignore_size or wst.st_size == ost.st_size and (not self.match.checksum or crc(original) == crc(work_file))):
+                        or wst.st_mtime == ost.st_mtime
+                        or self.match.tolerate_hour and self.match.tolerate_hour[0] <= (wst.st_mtime - ost.st_mtime)/3600 <= self.match.tolerate_hour[1]
+                    ) and (self.match.ignore_size or wst.st_size == ost.st_size and (not self.match.checksum or crc(original) == crc(work_file))):
                 return original
 
     def _find_similar_media(self,  work_file: Path, comparing_image: bool, candidates: list[Path]):
