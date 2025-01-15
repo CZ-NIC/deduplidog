@@ -135,7 +135,7 @@ class Media:
 
     media_magic: bool = False
     """ Media files similarity detection.
-    Nor the size or date is compared for files with media suffixes.
+    Neither the size, date nor suffix is compared for files with media suffixes.
     A video is considered a duplicate if it has the same name and a similar number of frames, even if it has a different extension.
     An image is considered a duplicate if it has the same name and a similar image hash, even if the files are of different sizes.
     (This mode is considerably slower.)

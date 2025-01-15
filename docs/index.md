@@ -1,10 +1,7 @@
-<p align="center"><b>Deduplidog</b> – Deduplicator that covers your back.</p>
-<p align="center">
-  <img src="./asset/logo.jpg" />
-</p>
+# Deduplidog [![Build Status](https://github.com/CZ-NIC/deduplidog/actions/workflows/run-unittest.yml/badge.svg)](https://github.com/CZ-NIC/deduplidog/actions)
+  <img align="right" src="./asset/logo.jpg" />
 
-[![Build Status](https://github.com/CZ-NIC/deduplidog/actions/workflows/run-unittest.yml/badge.svg)](https://github.com/CZ-NIC/deduplidog/actions)
-
+A deduplicator that covers your back.
 
 - [About](#about)
    * [What are the use cases?](#what-are-the-use-cases)
