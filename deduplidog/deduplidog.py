@@ -608,7 +608,7 @@ class Deduplidog:
         add_file_elements("Original", other_file)
 
         self.m.facet._layout(els)
-        return getattr(self.m, "is_yes" if is_yes else "is_no")(self._get_action().capitalize())
+        return self.m.confirm(self._get_action().capitalize(), is_yes)
 
     def _rename(self, change: Change, affected_file: Path):
         msg = "renamable"

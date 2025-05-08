@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "deduplidog"
-version = "0.7.0"
+version = "0.7.2"
 description = "Yet another file deduplicator"
 authors = ["Edvard Rejthar <edvard.rejthar@nic.cz>"]
 license = "GPL-3.0-or-later"
@@ -12,7 +12,7 @@ homepage = "https://github.com/CZ-NIC/deduplidog"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-mininterface = "*"
+mininterface = { version = "^1", extras = ["basic"] }
 python = ">=3.11"
 humanize = "*"
 imagehash = "*"

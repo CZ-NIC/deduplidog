@@ -25,7 +25,7 @@ def main():
                     print("-"*100)
                     print(e)
                     continue
-                if not m.is_yes("Continue?"):
+                if not m.confirm("Continue?"):
                     break
         except KeyboardInterrupt:
             print("")
